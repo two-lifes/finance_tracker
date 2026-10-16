@@ -1,0 +1,25 @@
+# Production compose: copied to the server by CI, runs the image built and tested in CI.
+# Secrets live only in the server's .env next to this file.
+services:
+  bot:
+    image: ghcr.io/two-lifes/finance_tracker:${IMAGE_TAG:-latest}
+    env_file: .env
+    environment:
+      DB_PATH: /data/finance.db
+      # Set by deploy.sh on rollback so the bot can report the failed version
+      FAILED_VERSION: ${FAILED_VERSION:-}
+    volumes:
+      - ./data:/data
+    # Reaches the subscription bot's API (alias subs-api) without publishing any port
+    networks:
+      - bots_internal
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+networks:
+  bots_internal:
+    external: true

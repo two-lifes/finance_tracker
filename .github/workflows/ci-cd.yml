@@ -1,0 +1,90 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  IMAGE: ghcr.io/two-lifes/finance_tracker
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      # Runs pytest and ruff inside the same Python image that goes to production
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: test
+    # DEPLOY_ENABLED is a repository variable: deploys stay off until the server secrets are set
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && vars.DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    # Two deploys must never run on the server at the same time
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    env:
+      DEPLOY_DIR: ${{ vars.DEPLOY_DIR || '/opt/finance_tracker' }}
+      SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
+      TARGET: ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Read commit subject
+        id: commit
+        run: echo "title=$(git log -1 --format=%s)" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: runtime
+          push: true
+          # The bot reports its version to the owner after a successful deploy
+          build-args: |
+            APP_VERSION=${{ github.sha }}
+            APP_TITLE=${{ steps.commit.outputs.title }}
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:latest
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=gha
+
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          # A key pasted from Windows may carry CRLF line endings, which OpenSSH rejects
+          printf '%s\n' "$SSH_KEY" | tr -d '\r' > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          if ! ssh-keygen -y -P '' -f ~/.ssh/id_deploy > /dev/null; then
+            echo "::error::SSH_PRIVATE_KEY is not a valid passphrase-less OpenSSH private key"
+            exit 1
+          fi
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+      - name: Deploy
+        run: |
+          KEY="$HOME/.ssh/id_deploy"
+          scp -i "$KEY" -P "$SSH_PORT" -o StrictHostKeyChecking=yes \
+            deploy/docker-compose.yml deploy/deploy.sh "$TARGET:$DEPLOY_DIR/"
+          ssh -i "$KEY" -p "$SSH_PORT" -o StrictHostKeyChecking=yes \
+            "$TARGET" "bash $DEPLOY_DIR/deploy.sh ${{ github.sha }}"
