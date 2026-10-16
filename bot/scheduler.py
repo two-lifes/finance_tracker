@@ -23,7 +23,7 @@ from bot.integrations.cbr import CbrError, fetch_daily
 from bot.integrations.subs_client import SubsApiError, SubsClient
 from bot.keyboards import due_pay_keyboard, payday_keyboard
 from bot.services import external, notifications
-from bot.services.budget import record_debt_history
+from bot.services.budget import payout_of, record_debt_history
 from bot.services.dates import local_today
 from bot.services.deployments import pending_deployments
 from bot.views import BALANCE_REMINDER, deployment_text, loan_reminder, payday_question
@@ -45,8 +45,9 @@ async def _render(
     if n.kind == notifications.KIND_PAYDAY:
         payday = await session.get(Payday, n.ref_id)
         await session.refresh(payday, ["rule"])
-        return (payday_question(payday.rule, payday.scheduled, today),
-                payday_keyboard(payday.id, payday.rule.amount_minor))
+        payout = await payout_of(session, user, payday)
+        return (payday_question(payout, user, today),
+                payday_keyboard(payday.id, payout.amount))
     return BALANCE_REMINDER, None
 
 

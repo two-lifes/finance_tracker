@@ -14,7 +14,8 @@ from bot.services.loan_ops import EarlyResult, debt_of, interest_now, next_due
 from bot.services.loans import KIND_TITLES, LoanKind, RateUnit, Schedule
 from bot.services.money import format_money, format_rub
 from bot.services.obligations import Obligation, Source, State
-from bot.services.plural import DAYS, LOANS, MONTHS, count
+from bot.services.plural import DAYS, LOANS, MONTHS, SHIFTS, count
+from bot.services.work_calendar import Payout, Weekend, describe_periods
 
 NEAREST_COUNT = 3
 SUBS_STALE_HOURS = 3
@@ -67,7 +68,7 @@ def main_screen(view: View, user: User, subs_configured: bool) -> str:
                          "на обязательные платежи.")
         if view.payday is not None:
             delayed = " (задерживается)" if view.payday.delayed else ""
-            lines.append(f"Следующая выплата: {escape(view.payday.rule.title)}, "
+            lines.append(f"Следующая выплата: {escape(view.payday.payout.label)}, "
                          f"{fmt_date(limit.horizon)}{delayed} — через {count(limit.days, DAYS)}")
         else:
             lines.append(f"Дата зарплаты не задана — считаю на {count(limit.days, DAYS)}.")
@@ -218,10 +219,34 @@ def loan_reminder(loan: Loan, due: LoanDue, today: date) -> str:
 BALANCE_REMINDER = "Вечер — пришлите остаток на карте одним числом, и я посчитаю траты за день."
 
 
-def payday_question(rule: IncomeRule, scheduled: date, today: date) -> str:
-    when = "Сегодня" if scheduled == today else f"{fmt_date(scheduled)} был"
-    return (f"💵 {when} день выплаты: {escape(rule.title)} (≈ {format_rub(rule.amount_minor)}). "
-            "Деньги пришли?")
+def payout_breakdown(payout: Payout, user: User) -> str:
+    """'5 смен × 12 ч × 300 ₽ − 13%' for hourly pay; empty for fixed."""
+    if payout.shifts is None or user.hourly_rate_minor is None:
+        return ""
+    tax = Decimal(user.tax_percent or "0")
+    tax_part = f" − {format_percent(user.tax_percent)}%" if tax else ""
+    return (f"{count(payout.shifts, SHIFTS)} × {format_percent(user.shift_hours or '0')} ч × "
+            f"{format_rub(user.hourly_rate_minor)}{tax_part}")
+
+
+def payout_lines(items: list[Payout], user: User) -> str:
+    lines = []
+    for p in items:
+        breakdown = payout_breakdown(p, user)
+        extra = f" ({breakdown})" if breakdown else ""
+        lines.append(f"• {fmt_short(p.scheduled)} — {escape(p.label)} ≈ "
+                     f"{format_rub(p.amount)}{extra}")
+    return "\n".join(lines)
+
+
+def payday_question(payout: Payout, user: User, today: date) -> str:
+    when = "Сегодня" if payout.scheduled == today else f"{fmt_date(payout.scheduled)} был"
+    text = (f"💵 {when} день выплаты: {escape(payout.label)}, "
+            f"ожидалось ≈ {format_rub(payout.amount)}")
+    breakdown = payout_breakdown(payout, user)
+    if breakdown:
+        text += f" ({breakdown})"
+    return text + ". Деньги пришли?"
 
 
 def payday_summary(title: str, plan: PaydayPlan, today: date) -> str:
@@ -242,11 +267,40 @@ def payday_summary(title: str, plan: PaydayPlan, today: date) -> str:
 # --- settings -----------------------------------------------------------------------------
 
 
-def rules_text(rules: list[IncomeRule]) -> str:
-    if not rules:
+WEEKEND_TITLES = {
+    Weekend.BEFORE: "в пятницу перед выходными",
+    Weekend.AFTER: "в понедельник после выходных",
+    Weekend.SAME: "в тот же день",
+}
+
+
+def income_text(user: User, rules: list[IncomeRule]) -> str:
+    """Pay settings in a few lines."""
+    weekend = WEEKEND_TITLES[Weekend(user.weekend_shift or Weekend.BEFORE)]
+    if user.income_mode == "hourly":
+        cuts = sorted({r.day for r in rules})
+        tax = Decimal(user.tax_percent or "0")
+        rate = (f"{format_rub(user.hourly_rate_minor)}/ч" if user.hourly_rate_minor is not None
+                else "не задана")
+        lines = [
+            "почасовая",
+            f"  ставка: {rate}" + (f", налог {format_percent(user.tax_percent)}%" if tax
+                                   else ", на руки"),
+            "  смена: " + (f"≈ {format_percent(user.shift_hours)} ч" if user.shift_hours
+                           else "не задана"),
+            "  периоды: " + (describe_periods(cuts) if cuts else "не заданы"),
+            "  выплата: " + (f"через {count(user.pay_delay_days, DAYS)} после конца периода"
+                             if user.pay_delay_days is not None else "не задана"),
+        ]
+        if not user.shift_work:
+            lines.append("  ⚠️ для почасовой нужен график смен")
+    elif rules:
+        lines = ["; ".join(f"{escape(r.title)} {r.day}-го ≈ {format_rub(r.amount_minor)}"
+                           for r in rules)]
+    else:
         return "не заданы"
-    return "; ".join(f"{escape(r.title)} {r.day}-го ≈ {format_rub(r.amount_minor)}"
-                     for r in rules)
+    lines.append(f"  в выходной: {weekend}")
+    return "\n".join(lines)
 
 
 def settings_text(user: User, rules: list[IncomeRule]) -> str:
@@ -255,7 +309,7 @@ def settings_text(user: User, rules: list[IncomeRule]) -> str:
         "<b>Настройки</b>\n"
         f"Часовой пояс: {user.timezone or 'не задан'}\n"
         f"График: {shifts}\n"
-        f"Выплаты: {rules_text(rules)}\n"
+        f"Выплаты: {income_text(user, rules)}\n"
         f"Напоминания о платежах: в {user.remind_time:%H:%M}\n"
         f"Напоминание про остаток: в {user.evening_time:%H:%M}"
     )

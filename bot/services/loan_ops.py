@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -219,9 +219,24 @@ async def pay_due(
     )
     await session.flush()
     closed = await _close_if_repaid(session, loan, now)
-    if not closed and due.status == "paid":
+    if not closed and loan.schedule == Schedule.ONCE:
+        await _resync_single_due(session, loan)
+    elif not closed and due.status == "paid":
         await ensure_dues(session, loan, paid_on)
     return PaymentResult(alloc, closed)
+
+
+async def _resync_single_due(session: AsyncSession, loan: Loan) -> None:
+    """A single-payment loan owes what the debt will be on its date: after any payment
+    the interest saved makes the remaining amount smaller than 'original − paid'."""
+    owed = loan.principal_minor + interest_now(loan, loan.first_due)
+    for due in await _load_dues(session, loan):
+        if due.status != "paid":
+            due.amount_minor = due.paid_minor + owed
+            if due.paid_minor >= due.amount_minor:
+                due.status = "paid"
+            loan.payment_minor = due.amount_minor
+    await session.flush()
 
 
 @dataclass(frozen=True)
@@ -261,7 +276,10 @@ async def early_repay(
             loan.insurance_minor, alloc.principal, mode,
         )
         loan.payment_minor = schedule.payment_after
-    await regenerate_dues(session, loan, paid_on + timedelta(days=1))
+    if loan.schedule == Schedule.ONCE:
+        await _resync_single_due(session, loan)
+    else:
+        await regenerate_dues(session, loan, paid_on + timedelta(days=1))
     return EarlyResult(alloc, schedule, False)
 
 
@@ -269,7 +287,8 @@ async def settle_auto_debits(
     session: AsyncSession, user: User, up_to: date, now: datetime
 ) -> list[tuple[Loan, LoanDue]]:
     """Auto-debits due by ``up_to`` are assumed done (the balance already reflects them).
-    The user can undo one with "не списалось"."""
+    The user can undo one with "не списалось". Banks retry failed debits, so one marked
+    "не списалось" is assumed done again from the next day on, dated by that balance."""
     rows = await session.execute(
         select(Loan, LoanDue)
         .join(LoanDue, LoanDue.loan_id == Loan.id)
@@ -277,8 +296,10 @@ async def settle_auto_debits(
             Loan.user_id == user.id,
             Loan.status == "active",
             Loan.pay_method == "auto",
-            LoanDue.status == "expected",
-            LoanDue.due_date <= up_to,
+            or_(
+                (LoanDue.status == "expected") & (LoanDue.due_date <= up_to),
+                (LoanDue.status == "not_debited") & (LoanDue.retry_from <= up_to),
+            ),
         )
         .order_by(LoanDue.due_date)
     )
@@ -287,12 +308,15 @@ async def settle_auto_debits(
         if loan.status != "active":
             continue  # closed by an earlier due in this loop
         remaining = due.amount_minor - due.paid_minor
-        await pay_due(session, loan, due, remaining, due.due_date, "auto", now)
+        paid_on = due.due_date if due.status == "expected" else up_to
+        due.status = "expected"
+        due.retry_from = None
+        await pay_due(session, loan, due, remaining, paid_on, "auto", now)
         settled.append((loan, due))
     return settled
 
 
-async def undo_auto_debit(session: AsyncSession, due: LoanDue) -> bool:
+async def undo_auto_debit(session: AsyncSession, due: LoanDue, today: date) -> bool:
     """'Не списалось': reverts the assumed payment; the due becomes awaiting payment."""
     payment = await session.scalar(
         select(LoanPayment).where(LoanPayment.due_id == due.id, LoanPayment.source == "auto")
@@ -308,6 +332,7 @@ async def undo_auto_debit(session: AsyncSession, due: LoanDue) -> bool:
         loan.closed_at = None
     due.paid_minor -= payment.amount_minor
     due.status = "not_debited"
+    due.retry_from = today + timedelta(days=1)
     await session.delete(payment)
     await session.flush()
     return True

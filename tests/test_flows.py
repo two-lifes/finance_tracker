@@ -399,3 +399,141 @@ async def test_scheduler_syncs_hourly_and_survives_outages(h, now, cbr):
     assert h.subs.calls > calls
     text = await h.text(BTN_HOME)
     assert "Сервис подписок недоступен" in text
+
+
+async def test_mfo_partial_early_repayment_lowers_due(h):
+    await onboard(h, balance="50000")
+    await add_loan(h, lender="Займер", kind="mfo", principal="15000", rate="0,8",
+                   payment="18000", due="25.10", method="manual")
+    [loan] = await h.all(Loan)
+    await h.tap(LoanCb(action="early", loan_id=loan.id).pack())
+    await h.text("10000")
+    [loan] = await h.all(Loan)
+    [due] = await h.all(LoanDue)
+    # The due is what will be owed on its date, not the original amount to return
+    from bot.services.loan_ops import debt_of
+    assert due.amount_minor == debt_of(loan, date(2026, 10, 25))
+    assert due.amount_minor < 1_800_000 - 1_000_000 + 1
+
+
+async def test_user_text_is_html_escaped(h):
+    await onboard(h, balance="50000")
+    await add_loan(h, lender="Банк <А> & Ко", payment="5000", due="20.10", method="manual")
+    [loan] = await h.all(Loan)
+    await h.tap(LoanCb(action="pay", loan_id=loan.id).pack())
+    raw = h.net.texts()[-1]
+    assert "Банк &lt;А&gt; &amp; Ко" in raw
+
+
+async def test_not_debited_is_retried_next_day(h, now):
+    await onboard(h, balance="20000")
+    await add_loan(h, payment="5000", due="18.10")
+    now.set(datetime(2026, 10, 18, 18, 0, tzinfo=UTC))
+    await h.text("19000")
+    [first, *_] = await h.all(LoanDue)
+    await h.tap(DueCb(action="undo", due_id=first.id).pack())
+    # The bank debited it a day later: 19 000 − 5 000 − 1 000 spent
+    now.set(datetime(2026, 10, 19, 18, 0, tzinfo=UTC))
+    text = await h.text("13000")
+    assert "Учёл автосписание: Сбер — 5 000 ₽" in text
+    assert "Потрачено со вчера: 1 000 ₽" in text
+    [payment] = await h.all(LoanPayment)
+    assert payment.paid_on == date(2026, 10, 19)
+    [first, *_] = await h.all(LoanDue)
+    assert first.status == "paid"
+
+
+async def onboard_hourly(h, tax="itax:13"):
+    await h.text("/start")
+    await h.tap("tz:Europe/Moscow")
+    await h.tap("shift:2/2")
+    await h.tap("spos:0")  # 17.10 is the 1st shift
+    await h.tap("itype:hourly")
+    await h.text("300")
+    await h.text("12")
+    await h.text("10 20 31")
+    await h.text("10")
+    preview = await h.tap(tax)
+    return preview
+
+
+async def test_hourly_onboarding_and_main_screen(h):
+    await onboard_hourly(h)
+    [user] = await h.all(User)
+    assert (user.income_mode, user.hourly_rate_minor, user.shift_hours, user.tax_percent,
+            user.pay_delay_days) == ("hourly", 30000, "12", "13", 10)
+    rules = await h.all(IncomeRule)
+    assert sorted(r.day for r in rules) == [10, 20, 31]
+    preview = h.net.texts()[-2].replace(" ", " ")
+    # 20.10 pays for 01.10–10.10; the pattern anchors 17.10 as the 1st shift of 2/2
+    assert "Зарплата за 01.10–10.10" in preview
+    assert "Сколько сейчас на карте" in h.net.last_text()
+    await h.text("20000")
+    text = await h.text(BTN_HOME)
+    assert "Следующая выплата: Зарплата за 01.10–10.10, 20.10.2026" in text
+
+
+async def test_hourly_payday_question_shows_estimate(h, now):
+    await onboard_hourly(h)
+    await h.text("20000")
+    now.set(datetime(2026, 10, 20, 7, 0, tzinfo=UTC))
+    await h.tick()
+    question = h.net.sent()[-1]
+    text = question.text.replace(" ", " ")
+    # 2/2 with 17.10 as 1st shift: 1–10 October has 6 shifts (1, 2, 5, 6, 9, 10)
+    assert "Зарплата за 01.10–10.10, ожидалось ≈ 18 792 ₽" in text
+    assert "6 смен × 12 ч × 300 ₽ − 13%" in text
+    data = question.reply_markup.inline_keyboard[0][0].callback_data
+    text = await h.tap(data)
+    assert "Зарплата за 01.10–10.10: пришло 18 792 ₽" in text
+    [income] = await h.all(Income)
+    assert income.amount_minor == 1_879_200
+
+
+async def test_hourly_requires_shift_pattern(h):
+    await h.text("/start")
+    await h.tap("tz:Europe/Moscow")
+    await h.tap("shift:none")
+    text = await h.tap("itype:hourly")
+    assert "нужен график смен" in text
+    # Onboarding asks for the pattern again and then returns to the pay type
+    await h.tap("shift:5/2")
+    assert "Как вам платят?" in h.net.last_text()
+
+
+async def test_edit_single_hourly_field(h):
+    await onboard_hourly(h, tax="itax:0")
+    await h.text("20000")
+    await h.tap("settings:income")
+    await h.tap("iset:tax")
+    await h.tap("itax:other")
+    text = await h.text("15")
+    assert "налог 15%" in text
+    [user] = await h.all(User)
+    assert user.tax_percent == "15"
+    await h.tap("iset:rate")
+    text = await h.text("350")
+    assert "350 ₽/ч" in text
+
+
+async def test_weekend_rule_setting(h):
+    await onboard(h, income="25 50000")  # 25.10 is a Sunday
+    await h.tap("settings:income")
+    await h.tap("iset:weekend")
+    text = await h.tap("iweekend:after")
+    assert "в понедельник после выходных" in text
+    text = await h.text(BTN_HOME)
+    assert "26.10.2026" in text
+
+
+async def test_abandoned_hourly_setup_keeps_old_settings(h):
+    await onboard(h, income="23 50000")
+    await h.tap("settings:income")
+    await h.tap("iset:all")
+    await h.tap("itype:hourly")
+    await h.text("300")
+    await h.text("/cancel")
+    [user] = await h.all(User)
+    assert user.income_mode == "fixed"
+    [rule] = await h.all(IncomeRule)
+    assert (rule.day, rule.amount_minor) == (23, 5_000_000)

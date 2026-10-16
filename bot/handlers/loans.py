@@ -1,6 +1,7 @@
 import re
 from datetime import date
 from decimal import Decimal, InvalidOperation
+from html import escape
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -356,7 +357,7 @@ async def pay_start(callback: CallbackQuery, callback_data: LoanCb, session: Asy
         )
         return
     await callback.message.answer(
-        f"Платёж по «{loan.lender}» на {due.due_date:%d.%m}: "
+        f"Платёж по «{escape(loan.lender)}» на {due.due_date:%d.%m}: "
         f"{format_rub(due.amount_minor - due.paid_minor)}",
         reply_markup=due_pay_keyboard(due),
     )
@@ -374,7 +375,7 @@ async def pay_other_amount(callback: CallbackQuery, callback_data: DueCb, state:
     await state.update_data(due_id=due.id)
     await callback.answer()
     await callback.message.answer(
-        f"Сколько внесли по «{loan.lender}»? По графику — "
+        f"Сколько внесли по «{escape(loan.lender)}»? По графику — "
         f"{format_rub(due.amount_minor - due.paid_minor)}. Если больше — остаток пойдёт "
         "в досрочное погашение.\n/cancel — отмена"
     )
@@ -411,7 +412,7 @@ async def pay_amount(message: Message, state: FSMContext, session: AsyncSession,
     extra = amount - left
     if result.closed or extra == 0:
         await state.clear()
-        text = f"✅ {loan.lender}: оплачено {format_rub(min(amount, left))}."
+        text = f"✅ {escape(loan.lender)}: оплачено {format_rub(min(amount, left))}."
         if result.closed:
             text += "\n🎉 Кредит полностью погашен!"
         await message.answer(text)
@@ -447,7 +448,7 @@ async def early_start(callback: CallbackQuery, callback_data: LoanCb, state: FSM
     await callback.answer()
     owed = loan.principal_minor + interest_now(loan, user_today(user.timezone))
     await callback.message.answer(
-        f"Сколько вносите досрочно в «{loan.lender}»? Для полного погашения — "
+        f"Сколько вносите досрочно в «{escape(loan.lender)}»? Для полного погашения — "
         f"{format_rub(owed)}.\n/cancel — отмена"
     )
 
@@ -495,9 +496,10 @@ async def ask_close_delete(callback: CallbackQuery, callback_data: LoanCb,
         return
     await callback.answer()
     if callback_data.action == "close":
-        question = f"Кредит «{loan.lender}» полностью погашен? Он уйдёт из списка и напоминаний."
+        question = (f"Кредит «{escape(loan.lender)}» полностью погашен? "
+                    "Он уйдёт из списка и напоминаний.")
     else:
-        question = (f"Удалить «{loan.lender}» со всей историей платежей? "
+        question = (f"Удалить «{escape(loan.lender)}» со всей историей платежей? "
                     "Если кредит погашен — лучше «🏁 Закрыт».")
     yes = LoanCb(action=f"{callback_data.action}_yes", loan_id=loan.id)
     await show(callback, question, yes_no_keyboard(yes, LoanCb(action="open", loan_id=loan.id)))
@@ -541,7 +543,7 @@ async def edit_menu(callback: CallbackQuery, callback_data: LoanCb, session: Asy
     if loan is None or loan.status != "active":
         await callback.answer("Кредит не найден.")
         return
-    await show(callback, f"Что изменить в «{loan.lender}»?", loan_edit_keyboard(loan.id))
+    await show(callback, f"Что изменить в «{escape(loan.lender)}»?", loan_edit_keyboard(loan.id))
     await callback.answer()
 
 

@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import date, datetime
+from decimal import Decimal
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -212,6 +213,47 @@ def rule_info(rule: IncomeRule) -> wc.IncomeRule:
     return wc.IncomeRule(rule.id, rule.title, rule.day, rule.amount_minor)
 
 
+def work_pattern(user: User) -> wc.WorkPattern | None:
+    if not user.shift_work or user.shift_anchor is None:
+        return None
+    return wc.WorkPattern(user.shift_work, user.shift_off or 0, user.shift_anchor)
+
+
+def hourly_pay(user: User) -> wc.HourlyPay | None:
+    """None unless hourly pay is fully set up (it needs the shift pattern too)."""
+    pattern = work_pattern(user)
+    if (pattern is None or user.hourly_rate_minor is None or user.shift_hours is None
+            or user.pay_delay_days is None):
+        return None
+    return wc.HourlyPay(user.hourly_rate_minor, Decimal(user.shift_hours),
+                        Decimal(user.tax_percent or "0"), user.pay_delay_days, pattern)
+
+
+async def pay_schedule(session: AsyncSession, user: User) -> wc.PaySchedule:
+    rules = [rule_info(r) for r in await income_rules(session, user)]
+    weekend = wc.Weekend(user.weekend_shift or wc.Weekend.BEFORE)
+    if user.income_mode == "hourly":
+        hourly = hourly_pay(user)
+        # Half-configured hourly pay must not be read as fixed paydays of 0 ₽
+        return wc.PaySchedule(rules if hourly else [], weekend, hourly)
+    return wc.PaySchedule(rules, weekend)
+
+
+async def save_rules(
+    session: AsyncSession, user: User, rules: list[tuple[int, int, str]]
+) -> None:
+    """Replaces income rules as (day, amount, title), reusing existing rows so paydays
+    already confirmed keep their history."""
+    existing = await income_rules(session, user)
+    for row, (day, amount, title) in zip(existing, rules, strict=False):
+        row.day, row.amount_minor, row.title = day, amount, title
+    for row in existing[len(rules):]:
+        await session.delete(row)
+    for day, amount, title in rules[len(existing):]:
+        session.add(IncomeRule(user_id=user.id, title=title, day=day, amount_minor=amount))
+    await session.flush()
+
+
 async def payday_records(session: AsyncSession, user: User) -> list[wc.PaydayRecord]:
     rows = await session.scalars(
         select(Payday).join(IncomeRule).where(IncomeRule.user_id == user.id)
@@ -235,8 +277,18 @@ async def get_payday(
 async def upcoming_paydays(
     session: AsyncSession, user: User, today: date
 ) -> list[wc.ExpectedPayday]:
-    rules = [rule_info(r) for r in await income_rules(session, user)]
-    return wc.expected_paydays(rules, await payday_records(session, user), today)
+    schedule = await pay_schedule(session, user)
+    return wc.expected_paydays(schedule, await payday_records(session, user), today)
+
+
+async def payout_of(session: AsyncSession, user: User, payday: Payday) -> wc.Payout:
+    """What a payday row is expected to bring; falls back to the rule's own amount if the
+    settings changed since and the date no longer matches the schedule."""
+    schedule = await pay_schedule(session, user)
+    payout = wc.find_payout(schedule, payday.rule_id, payday.scheduled)
+    if payout is None:
+        payout = wc.Payout(rule_info(payday.rule), payday.scheduled, payday.rule.amount_minor)
+    return payout
 
 
 async def receive_payday(

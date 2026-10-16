@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.db.models import BalanceSnapshot, Loan, LoanDue, Notification, Payday, User
-from bot.services.budget import CARD, get_payday, income_rules, payday_records, rule_info
+from bot.services.budget import CARD, get_payday, pay_schedule, payday_records
 from bot.services.dates import local_today
 from bot.services.work_calendar import due_today
 
@@ -84,10 +84,10 @@ async def _plan_balance(session: AsyncSession, user: User, today: date, now: dat
 async def _plan_paydays(session: AsyncSession, user: User, today: date, now: datetime) -> None:
     if now < moment(today, user.remind_time, user.timezone):
         return
-    rules = [rule_info(r) for r in await income_rules(session, user)]
+    schedule = await pay_schedule(session, user)
     records = await payday_records(session, user)
     promised = {(r.rule_id, r.scheduled): r.delayed_until for r in records}
-    for expected in due_today(rules, records, today):
+    for expected in due_today(schedule, records, today):
         # Delayed: wait until the promised date. Otherwise ask every day until answered,
         # since the limit keeps expecting the money "tomorrow"
         until = promised.get((expected.rule.id, expected.scheduled))

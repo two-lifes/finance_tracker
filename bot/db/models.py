@@ -35,6 +35,16 @@ class User(Base):
     shift_work: Mapped[int | None] = mapped_column(Integer)
     shift_off: Mapped[int | None] = mapped_column(Integer)
     shift_anchor: Mapped[date | None] = mapped_column(Date)
+    # fixed: income rules are paydays with amounts; hourly: rules are pay period ends
+    income_mode: Mapped[str] = mapped_column(String(8), default="fixed", server_default="fixed")
+    hourly_rate_minor: Mapped[int | None] = mapped_column(BigInteger)
+    # Decimal as text
+    shift_hours: Mapped[str | None] = mapped_column(String(10))
+    tax_percent: Mapped[str] = mapped_column(String(10), default="0", server_default="0")
+    pay_delay_days: Mapped[int | None] = mapped_column(Integer)
+    # before / after / same: payday on a weekend
+    weekend_shift: Mapped[str] = mapped_column(String(6), default="before",
+                                               server_default="before")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -154,6 +164,8 @@ class LoanDue(Base):
     paid_minor: Mapped[int] = mapped_column(BigInteger, default=0)
     # expected / paid / not_debited (auto-debit that the user said didn't happen)
     status: Mapped[str] = mapped_column(String(12), default="expected")
+    # not_debited only: from this day the debit is assumed to have gone through after all
+    retry_from: Mapped[date | None] = mapped_column(Date)
 
     loan: Mapped[Loan] = relationship(back_populates="dues")
 

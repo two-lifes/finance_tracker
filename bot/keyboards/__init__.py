@@ -228,3 +228,45 @@ def delay_keyboard(payday_id: int) -> InlineKeyboardMarkup:
     builder.button(text="Ввести дату", callback_data=PaydayCb(action="date", payday_id=payday_id))
     builder.adjust(2)
     return builder.as_markup()
+
+
+def income_type_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Фиксированные суммы", callback_data="itype:fixed")
+    builder.button(text="Почасовая оплата", callback_data="itype:hourly")
+    builder.button(text="Пропустить", callback_data="itype:skip")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def tax_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="На руки (0%)", callback_data="itax:0")
+    builder.button(text="До НДФЛ 13%", callback_data="itax:13")
+    builder.button(text="Другой %", callback_data="itax:other")
+    builder.adjust(2)
+    return builder.as_markup()
+
+
+def weekend_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Раньше, в пятницу", callback_data="iweekend:before")
+    builder.button(text="Позже, в понедельник", callback_data="iweekend:after")
+    builder.button(text="В тот же день", callback_data="iweekend:same")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def income_settings_keyboard(hourly: bool) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Настроить заново", callback_data="iset:all")
+    if hourly:
+        builder.button(text="Ставка", callback_data="iset:rate")
+        builder.button(text="Часы в смене", callback_data="iset:hours")
+        builder.button(text="Налог", callback_data="iset:tax")
+        builder.button(text="Периоды", callback_data="iset:cuts")
+        builder.button(text="Через сколько дней", callback_data="iset:delay")
+    builder.button(text="Выплата в выходной", callback_data="iset:weekend")
+    builder.button(text="« Настройки", callback_data="settings:back")
+    builder.adjust(1, 2)
+    return builder.as_markup()

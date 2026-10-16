@@ -2,6 +2,7 @@
 
 import re
 from datetime import date, timedelta
+from html import escape
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
@@ -21,6 +22,7 @@ from bot.services.budget import (
     add_income,
     build_view,
     get_payday,
+    payout_of,
     receive_payday,
     upcoming_paydays,
 )
@@ -50,9 +52,9 @@ async def income_start(message: Message, state: FSMContext, session: AsyncSessio
     builder = InlineKeyboardBuilder()
     paydays = await upcoming_paydays(session, user, user_today(user.timezone))
     if paydays:
-        builder.button(text=f"💵 {paydays[0].rule.title}: пришла",
+        builder.button(text=f"💵 {paydays[0].payout.label}: пришла",
                        callback_data=f"inc:recv:{paydays[0].rule.id}:{paydays[0].scheduled}")
-        builder.button(text=f"⏳ {paydays[0].rule.title}: задерживается",
+        builder.button(text=f"⏳ {paydays[0].payout.label}: задерживается",
                        callback_data=f"inc:delay:{paydays[0].rule.id}:{paydays[0].scheduled}")
         builder.adjust(1)
     await message.answer(
@@ -97,8 +99,9 @@ async def income_recv_button(callback: CallbackQuery, state: FSMContext,
         return
     await state.set_state(IncomeInput.payday_amount)
     await state.update_data(payday_id=payday.id)
+    expected = (await payout_of(session, user, payday)).amount
     await callback.message.answer(
-        f"Сколько пришло? Ожидалось ≈ {format_rub(payday.rule.amount_minor)}.\n/cancel — отмена"
+        f"Сколько пришло? Ожидалось ≈ {format_rub(expected)}.\n/cancel — отмена"
     )
 
 
@@ -128,12 +131,13 @@ async def _own_payday(session: AsyncSession, user: User, payday_id: int) -> Payd
 async def _receive(message: Message, session: AsyncSession, user: User, payday: Payday,
                    amount: int) -> None:
     today = user_today(user.timezone)
+    label = (await payout_of(session, user, payday)).label
     await receive_payday(session, user, payday, amount, today, utcnow())
     paydays = await upcoming_paydays(session, user, today)
     horizon = paydays[0].effective if paydays else default_horizon(today)
     view = await build_view(session, user, today)
     plan = payday_plan(amount, view.obligations, horizon)
-    await message.answer(payday_summary(payday.rule.title, plan, today) +
+    await message.answer(payday_summary(label, plan, today) +
                          "\n\nПришлите остаток на карте — пересчитаю лимит.",
                          reply_markup=main_menu())
 
@@ -147,7 +151,8 @@ async def payday_yes(callback: CallbackQuery, callback_data: PaydayCb,
         return
     await callback.answer()
     await drop_buttons(callback)
-    await _receive(callback.message, session, user, payday, payday.rule.amount_minor)
+    payout = await payout_of(session, user, payday)
+    await _receive(callback.message, session, user, payday, payout.amount)
 
 
 @router.callback_query(PaydayCb.filter(F.action == "other"))
@@ -194,8 +199,8 @@ async def _set_delay(message: Message, payday: Payday, until: date) -> None:
     payday.status = "delayed"
     payday.delayed_until = until
     await message.answer(
-        f"Понял, жду {payday.rule.title.lower()} {fmt_date(until)}. Лимит пересчитан до этой "
-        "даты, в этот день спрошу снова."
+        f"Понял, жду {escape(payday.rule.title.lower())} {fmt_date(until)}. "
+        "Лимит пересчитан до этой даты, в этот день спрошу снова."
     )
 
 

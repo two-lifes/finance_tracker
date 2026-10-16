@@ -1,6 +1,7 @@
 """Main screen and free-text input: balance, cash, '+5000 премия', '500 еда'."""
 
 import re
+from html import escape
 
 from aiogram import F, Router
 from aiogram.filters import Command, StateFilter
@@ -88,7 +89,7 @@ async def other_income(message: Message, session: AsyncSession, user: User) -> N
         return
     comment = match.group(2).strip()[:MAX_COMMENT] or None
     await add_income(session, user, amount, "other", comment, user_today(user.timezone), utcnow())
-    note = f" ({comment})" if comment else ""
+    note = f" ({escape(comment)})" if comment else ""
     await message.answer(f"Записал поступление {format_rub(amount)}{note}.")
 
 
@@ -118,7 +119,7 @@ async def expense_note(message: Message, session: AsyncSession, user: User) -> N
         return
     category = match.group(2).strip()[:50]
     await add_expense_note(session, user, amount, category, user_today(user.timezone), utcnow())
-    await message.answer(f"Записал: {format_rub(amount)} — {category}. "
+    await message.answer(f"Записал: {format_rub(amount)} — {escape(category)}. "
                          "На расчёты это не влияет, траты я и так вижу по остатку.")
 
 
@@ -139,13 +140,15 @@ async def _due_and_loan(session: AsyncSession, user: User, due_id: int):
 async def due_not_debited(callback: CallbackQuery, callback_data: DueCb,
                           session: AsyncSession, user: User) -> None:
     due, loan = await _due_and_loan(session, user, callback_data.due_id)
-    if due is None or not await undo_auto_debit(session, due):
+    if due is None or not await undo_auto_debit(session, due, user_today(user.timezone)):
         await callback.answer("Уже неактуально.")
         return
     await callback.answer()
     await callback.message.answer(
-        f"Понял: {loan.lender} не списался. Платёж {format_rub(due.amount_minor - due.paid_minor)} "
-        "теперь «ждёт оплаты» и учтён в лимите. Траты пересчитаются при следующем остатке."
+        f"Понял: {escape(loan.lender)} не списался. "
+        f"Платёж {format_rub(due.amount_minor - due.paid_minor)} "
+        "теперь «ждёт оплаты» и учтён в лимите. Если банк спишет его позже — учту "
+        "по следующему остатку."
     )
 
 
@@ -160,7 +163,7 @@ async def due_paid(callback: CallbackQuery, callback_data: DueCb, session: Async
     result = await pay_due(session, loan, due, left, user_today(user.timezone), "manual", utcnow())
     await callback.answer("Записал")
     await drop_buttons(callback)
-    text = f"✅ {loan.lender}: оплачено {format_rub(left)}."
+    text = f"✅ {escape(loan.lender)}: оплачено {format_rub(left)}."
     if result.closed:
         text += "\n🎉 Кредит полностью погашен!"
     await callback.message.answer(text)
