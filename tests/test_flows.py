@@ -12,7 +12,7 @@ from bot.db.models import (
     LoanPayment,
     User,
 )
-from bot.keyboards import BTN_HOME, DueCb, EarlyCb, LoanCb
+from bot.keyboards import BTN_HOME, BTN_INCOME, DueCb, EarlyCb, LoanCb
 from tests.harness import onboard, plain
 from tests.tg_fakes import STRANGER_ID
 
@@ -221,6 +221,45 @@ async def test_free_text_inputs(h):
     assert note.category == "еда"
     text = await h.text(BTN_HOME)
     assert "наличные 2 000 ₽" in text
+
+
+async def test_delete_income_shows_a_week_then_everything(h, now):
+    await onboard(h)
+    now.set(datetime(2026, 10, 10, 7, 0, tzinfo=UTC))
+    await h.text("+1000 старое")
+    now.set(datetime(2026, 10, 17, 7, 0, tzinfo=UTC))
+    await h.text("+5200 наличка")
+
+    await h.text(BTN_INCOME)
+    labels = [button.text for row in h.net.sent()[-1].reply_markup.inline_keyboard
+              for button in row]
+    assert "Удалить поступление" in labels
+
+    week = await h.tap("inc:del")
+    assert "5 200" in week and "наличка" in week and "17.10" in week
+    assert "старое" not in week and "10.10" not in week
+    shown = [button.text for row in h.net.sent()[-1].reply_markup.inline_keyboard
+             for button in row]
+    assert shown == ["Показать за всё время"]
+
+    assert "номер из списка" in await h.text("9")
+    assert len(await h.all(Income)) == 2
+
+    removed = await h.text("1")
+    assert "Удалил" in removed and "наличка" in removed
+    assert "За последнюю неделю поступлений нет" in removed
+    [left] = await h.all(Income)
+    assert left.comment == "старое"
+
+    everything = await h.tap("inc:del:all")
+    assert "старое" in everything and "10.10" in everything
+    assert "наличка" not in everything
+    assert h.net.sent()[-1].reply_markup is None
+
+    done = await h.text("1")
+    assert "Удалил" in done and "старое" in done
+    assert "Поступлений пока нет" in done
+    assert await h.all(Income) == []
 
 
 async def test_cash_counts_in_spending(h, now):

@@ -246,6 +246,12 @@ def delay_keyboard(payday_id: int) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def delete_incomes_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Показать за всё время", callback_data="inc:del:all")
+    return builder.as_markup()
+
+
 def income_type_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="Фиксированные суммы", callback_data="itype:fixed")

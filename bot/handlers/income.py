@@ -17,12 +17,21 @@ from bot.clock import user_today, utcnow
 from bot.db.models import IncomeRule, Payday, User
 from bot.handlers.common import drop_buttons
 from bot.handlers.menu import menu_router
-from bot.keyboards import BTN_INCOME, PaydayCb, delay_keyboard, main_menu, prepay_keyboard
+from bot.keyboards import (
+    BTN_INCOME,
+    PaydayCb,
+    delay_keyboard,
+    delete_incomes_keyboard,
+    main_menu,
+    prepay_keyboard,
+)
 from bot.services.budget import (
     add_income,
     advice_for,
     build_view,
+    delete_income,
     get_payday,
+    list_incomes,
     payout_of,
     receive_payday,
     upcoming_paydays,
@@ -31,7 +40,7 @@ from bot.services.dates import fmt_date, parse_date
 from bot.services.limit import default_horizon, payday_plan
 from bot.services.loan_ops import active_loans
 from bot.services.money import format_rub, parse_rub
-from bot.views import advice_line, payday_summary
+from bot.views import advice_line, blocks, income_line, incomes_delete_text, payday_summary
 
 router = Router(name="income")
 
@@ -42,8 +51,13 @@ _AMOUNT_COMMENT_RE = re.compile(r"^\+?\s*(\d[\d\s .,]*(?:к|k|тыс\.?)?)\s*(.
 
 class IncomeInput(StatesGroup):
     other = State()
+    delete_index = State()
     payday_amount = State()
     delay_date = State()
+
+
+# Today and the six days before it
+_WEEK = timedelta(days=6)
 
 
 @menu_router.message(F.text == BTN_INCOME)
@@ -58,11 +72,12 @@ async def income_start(message: Message, state: FSMContext, session: AsyncSessio
                        callback_data=f"inc:recv:{paydays[0].rule.id}:{paydays[0].scheduled}")
         builder.button(text=f"⏳ {paydays[0].payout.label}: задерживается",
                        callback_data=f"inc:delay:{paydays[0].rule.id}:{paydays[0].scheduled}")
-        builder.adjust(1)
+    builder.button(text="Удалить поступление", callback_data="inc:del")
+    builder.adjust(1)
     await message.answer(
         "Сколько пришло и откуда? Например: <code>5000 подработка</code>.\n"
         "Можно и без кнопки, в любой момент: <code>+5000 подработка</code>.\n/cancel — отмена",
-        reply_markup=builder.as_markup() if paydays else None,
+        reply_markup=builder.as_markup(),
     )
 
 
@@ -78,6 +93,60 @@ async def income_other(message: Message, state: FSMContext, session: AsyncSessio
     await add_income(session, user, amount, "other", comment, user_today(user.timezone), utcnow())
     await state.clear()
     await message.answer(f"Записал поступление {format_rub(amount)}.", reply_markup=main_menu())
+
+
+async def _income_page(
+    session: AsyncSession, user: User, all_time: bool
+) -> tuple[str, list[int]]:
+    today = user_today(user.timezone)
+    since = None if all_time else today - _WEEK
+    rows = await list_incomes(session, user, since)
+    return incomes_delete_text(rows, all_time=all_time), [row.id for row in rows]
+
+
+async def _open_incomes(
+    message: Message, state: FSMContext, session: AsyncSession, user: User, all_time: bool
+) -> None:
+    text, ids = await _income_page(session, user, all_time)
+    await state.set_state(IncomeInput.delete_index)
+    await state.update_data(income_ids=ids, income_all=all_time)
+    markup = None if all_time else delete_incomes_keyboard()
+    await message.answer(text, reply_markup=markup)
+
+
+@router.callback_query(F.data == "inc:del")
+async def incomes_delete_open(callback: CallbackQuery, state: FSMContext,
+                              session: AsyncSession, user: User) -> None:
+    await callback.answer()
+    await _open_incomes(callback.message, state, session, user, all_time=False)
+
+
+@router.callback_query(F.data == "inc:del:all")
+async def incomes_delete_all(callback: CallbackQuery, state: FSMContext,
+                             session: AsyncSession, user: User) -> None:
+    await callback.answer()
+    await _open_incomes(callback.message, state, session, user, all_time=True)
+
+
+@router.message(IncomeInput.delete_index, F.text)
+async def incomes_delete_number(message: Message, state: FSMContext, session: AsyncSession,
+                                user: User) -> None:
+    data = await state.get_data()
+    ids: list[int] = data.get("income_ids") or []
+    number = message.text.strip()
+    if not ids:
+        await message.answer("Список пуст. /cancel — выйти.")
+        return
+    if not number.isdecimal() or not 1 <= int(number) <= len(ids):
+        await message.answer("Нужен номер из списка, например <code>1</code>.")
+        return
+    removed = await delete_income(session, user, ids[int(number) - 1])
+    note = f"Удалил: {income_line(removed)}." if removed is not None else "Этой записи уже нет."
+    all_time = bool(data.get("income_all"))
+    text, new_ids = await _income_page(session, user, all_time)
+    await state.update_data(income_ids=new_ids, income_all=all_time)
+    markup = None if all_time else delete_incomes_keyboard()
+    await message.answer(blocks(note, text), reply_markup=markup)
 
 
 async def _payday_from_button(session: AsyncSession, user: User, data: str) -> Payday | None:

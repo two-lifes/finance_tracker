@@ -9,7 +9,7 @@ from decimal import Decimal
 from html import escape
 from zoneinfo import ZoneInfo
 
-from bot.db.models import Deployment, IncomeRule, Loan, LoanDue, User
+from bot.db.models import Deployment, Income, IncomeRule, Loan, LoanDue, User
 from bot.services.budget import BalanceResult, View
 from bot.services.dates import WEEKDAYS_SHORT, fmt_date, fmt_words, relative_days
 from bot.services.deployments import STATUS_OK
@@ -384,6 +384,24 @@ WEEKEND_TITLES = {
     Weekend.AFTER: "в понедельник после выходных",
     Weekend.SAME: "в тот же день",
 }
+
+
+def income_line(income: Income) -> str:
+    comment = f" · {escape(income.comment)}" if income.comment else ""
+    return f"{day_label(income.on_date)} · <b>{format_rub(income.amount_minor)}</b>{comment}"
+
+
+def incomes_delete_text(incomes: list[Income], *, all_time: bool) -> str:
+    title = "Все поступления" if all_time else "Поступления за последнюю неделю"
+    if not incomes:
+        empty = "Поступлений пока нет." if all_time else "За последнюю неделю поступлений нет."
+        return f"🗑 <b>{title}</b>\n\n{empty}"
+    lines = [f"<b>{n}.</b> {income_line(row)}" for n, row in enumerate(incomes, 1)]
+    return blocks(
+        f"🗑 <b>{title}</b>",
+        quote(lines),
+        "Напишите номер поступления, которое удалить.\n/cancel — отмена",
+    )
 
 
 def income_text(user: User, rules: list[IncomeRule]) -> str:

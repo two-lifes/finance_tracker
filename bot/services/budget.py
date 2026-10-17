@@ -203,6 +203,26 @@ async def add_income(
     return income
 
 
+async def list_incomes(
+    session: AsyncSession, user: User, since: date | None = None
+) -> list[Income]:
+    """Newest first. ``since`` limits by the income date, inclusive."""
+    query = select(Income).where(Income.user_id == user.id)
+    if since is not None:
+        query = query.where(Income.on_date >= since)
+    rows = await session.scalars(query.order_by(Income.on_date.desc(), Income.id.desc()))
+    return list(rows)
+
+
+async def delete_income(session: AsyncSession, user: User, income_id: int) -> Income | None:
+    income = await session.get(Income, income_id)
+    if income is None or income.user_id != user.id:
+        return None
+    await session.delete(income)
+    await session.flush()
+    return income
+
+
 async def add_expense_note(
     session: AsyncSession, user: User, amount: int, category: str, on: date, now: datetime
 ) -> None:
