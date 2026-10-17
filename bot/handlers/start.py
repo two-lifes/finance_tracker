@@ -10,7 +10,7 @@ from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.clock import user_today, utcnow
+from bot.clock import as_utc, user_today, utcnow
 from bot.db.models import User
 from bot.handlers.common import show
 from bot.handlers.flow import SHIFTS_PROMPT, Setup, back_to_settings, is_onboarding
@@ -25,7 +25,7 @@ from bot.keyboards import (
     timezone_keyboard,
 )
 from bot.services.budget import CARD, income_rules, save_snapshot
-from bot.services.dates import parse_time
+from bot.services.dates import ago, parse_time
 from bot.services.deployments import list_deployments
 from bot.services.money import format_rub, parse_rub
 from bot.services.tz import parse_timezone
@@ -301,9 +301,13 @@ async def type_evening(message: Message, state: FSMContext, session: AsyncSessio
 
 
 @router.callback_query(F.data == "settings:updates")
-async def settings_updates(callback: CallbackQuery, session: AsyncSession) -> None:
-    deployments = await list_deployments(session)
-    text = "\n\n".join(deployment_text(d) for d in deployments) or "Обновлений пока не было."
+async def settings_updates(callback: CallbackQuery, session: AsyncSession,
+                           user: User) -> None:
+    now, tz = utcnow(), user.timezone or "Europe/Moscow"
+    items = [deployment_text(d, ago(as_utc(d.created_at), now, tz))
+             for d in await list_deployments(session)]
+    text = ("🔄 <b>Обновления</b>\n\n" + "\n\n".join(items)) if items else \
+        "Обновлений пока не было."
     builder = InlineKeyboardBuilder()
     builder.button(text="« Настройки", callback_data="settings:back")
     await show(callback, text, builder.as_markup())

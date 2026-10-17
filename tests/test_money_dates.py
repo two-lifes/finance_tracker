@@ -1,8 +1,8 @@
-from datetime import date
+from datetime import UTC, date, datetime
 
 import pytest
 
-from bot.services.dates import add_months, fmt_date, fmt_words, parse_date, relative_days
+from bot.services.dates import add_months, ago, fmt_date, fmt_words, parse_date, relative_days
 from bot.services.money import (
     NBSP,
     format_money,
@@ -98,3 +98,22 @@ def test_parse_date():
     assert parse_date("01.10", today, future=False) == date(2026, 10, 1)
     assert parse_date("31.02", today) is None
     assert parse_date("05.11.27", today) == date(2027, 11, 5)
+
+
+@pytest.mark.parametrize(
+    ("moment", "expected"),
+    [
+        # now: 17.10.2026 10:00 Moscow (07:00 UTC)
+        (datetime(2026, 10, 17, 6, 59, 30, tzinfo=UTC), "только что"),
+        (datetime(2026, 10, 17, 6, 55, tzinfo=UTC), "5 минут назад"),
+        (datetime(2026, 10, 17, 6, 39, tzinfo=UTC), "21 минуту назад"),
+        (datetime(2026, 10, 17, 6, 0, tzinfo=UTC), "1 час назад"),
+        (datetime(2026, 10, 17, 3, 0, tzinfo=UTC), "4 часа назад"),
+        (datetime(2026, 10, 16, 23, 0, tzinfo=UTC), "сегодня в 02:00"),
+        (datetime(2026, 10, 16, 12, 50, tzinfo=UTC), "вчера в 15:50"),
+        (datetime(2026, 10, 1, 9, 5, tzinfo=UTC), "01.10 в 12:05"),
+        (datetime(2025, 12, 31, 9, 5, tzinfo=UTC), "31.12.2025 в 12:05"),
+    ],
+)
+def test_ago(moment, expected):
+    assert ago(moment, datetime(2026, 10, 17, 7, 0, tzinfo=UTC), "Europe/Moscow") == expected

@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 
-from bot.db.models import Loan, Notification, User
+from bot.db.models import Deployment, Loan, Notification, User
 from bot.keyboards import BTN_HOME, BTN_LOANS, BTN_SUBS, LoanCb
 from tests.harness import onboard, plain
 from tests.test_flows import add_loan, sub_json
@@ -141,3 +141,19 @@ async def test_subscriptions_screen(h):
     assert top.index("Claude Code") < top.index("Кинопоиск") < top.index("Музыка")
     assert "Облако" not in top and "Старое" not in text
     assert "20 $" in top
+
+
+async def test_updates_history_shows_when(h):
+    await onboard(h)
+    async with h.sessionmaker() as session, session.begin():
+        session.add_all([
+            Deployment(version="a" * 40, title="Stage 1", status="ok",
+                       created_at=datetime(2026, 10, 16, 12, 50, tzinfo=UTC),
+                       notified_at=datetime(2026, 10, 16, 12, 51, tzinfo=UTC)),
+            Deployment(version="b" * 40, title="Stage 2", status="ok",
+                       created_at=datetime(2026, 10, 17, 6, 0, tzinfo=UTC),
+                       notified_at=datetime(2026, 10, 17, 6, 1, tzinfo=UTC)),
+        ])
+    text = await h.tap("settings:updates")
+    assert text.index("bbbbbbb · 1 час назад") < text.index("aaaaaaa · вчера в 15:50")
+    assert "Stage 2" in text

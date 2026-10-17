@@ -435,12 +435,14 @@ def settings_text(user: User, rules: list[IncomeRule]) -> str:
     )
 
 
-def deployment_text(d: Deployment) -> str:
+def deployment_text(d: Deployment, when: str | None = None) -> str:
+    """``when``: '2 часа назад', for the history; a fresh notice goes without it."""
+    stamp = f" · <i>{when}</i>" if when else ""
     if d.status == STATUS_OK:
         title = f"\n{escape(d.title)}" if d.title else ""
-        return f"🔄 Бот обновлён до версии <code>{d.version[:7]}</code>{title}"
-    return (f"⚠️ Обновление <code>{d.version[:7]}</code> не запустилось, "
-            "бот вернулся на предыдущую версию.")
+        return f"🔄 Бот обновлён до версии <code>{d.version[:7]}</code>{stamp}{title}"
+    return (f"⚠️ Обновление <code>{d.version[:7]}</code> не запустилось{stamp}\n"
+            "Бот вернулся на предыдущую версию.")
 
 
 # --- subscriptions ------------------------------------------------------------------------

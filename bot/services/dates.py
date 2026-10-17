@@ -2,7 +2,7 @@ import re
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
-from bot.services.plural import DAYS, count
+from bot.services.plural import DAYS, HOURS, MINUTES, count
 
 MONTHS_GENITIVE = (
     "января", "февраля", "марта", "апреля", "мая", "июня",
@@ -14,6 +14,26 @@ WEEKDAYS_SHORT = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
 
 def local_today(now_utc: datetime, tz: str) -> date:
     return now_utc.astimezone(ZoneInfo(tz)).date()
+
+
+def ago(moment: datetime, now: datetime, tz: str) -> str:
+    """'только что' / '5 минут назад' / '2 часа назад' / 'вчера в 15:50' / '17.10 в 15:50'."""
+    seconds = (now - moment).total_seconds()
+    local, today = moment.astimezone(ZoneInfo(tz)), local_today(now, tz)
+    if seconds < 60:
+        return "только что"
+    if seconds < 3600:
+        return f"{count(int(seconds // 60), MINUTES)} назад"
+    if seconds < 6 * 3600:
+        return f"{count(int(seconds // 3600), HOURS)} назад"
+    at = f"{local:%H:%M}"
+    if local.date() == today:
+        return f"сегодня в {at}"
+    if local.date() == today - timedelta(days=1):
+        return f"вчера в {at}"
+    if local.year == today.year:
+        return f"{local:%d.%m} в {at}"
+    return f"{local:%d.%m.%Y} в {at}"
 
 
 def fmt_date(d: date) -> str:
