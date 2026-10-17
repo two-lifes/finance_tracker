@@ -1,4 +1,8 @@
-"""User-facing text (Russian, HTML parse mode)."""
+"""User-facing text (Russian, HTML parse mode).
+
+Layout: a bold headline with the key number, details grouped in <blockquote> blocks,
+long explanations in an expandable blockquote, blocks separated by an empty line.
+"""
 
 from datetime import date, datetime
 from decimal import Decimal
@@ -7,41 +11,73 @@ from zoneinfo import ZoneInfo
 
 from bot.db.models import Deployment, IncomeRule, Loan, LoanDue, User
 from bot.services.budget import BalanceResult, View
-from bot.services.dates import fmt_date, fmt_short, relative_days
+from bot.services.dates import WEEKDAYS_SHORT, fmt_date, fmt_words, relative_days
 from bot.services.deployments import STATUS_OK
+from bot.services.forecast import Shortfall
 from bot.services.limit import PaydayPlan
 from bot.services.loan_ops import EarlyResult, debt_of, interest_now, next_due
 from bot.services.loans import KIND_TITLES, LoanKind, RateUnit, Schedule
 from bot.services.money import format_money, format_rub
 from bot.services.obligations import Obligation, Source, State
 from bot.services.plural import DAYS, LOANS, MONTHS, SHIFTS, count
+from bot.services.priority import Group, group_of
+from bot.services.strategy import Advice
+from bot.services.subscriptions import MonthlyCost
 from bot.services.work_calendar import Payout, Weekend, describe_periods
 
 NEAREST_COUNT = 3
 SUBS_STALE_HOURS = 3
+
+KIND_ICONS = {
+    LoanKind.BANK: "🏦",
+    LoanKind.MFO: "⚡",
+    LoanKind.CARD: "💳",
+    LoanKind.INSTALLMENT: "🛍",
+}
 
 
 def _local(moment: datetime, tz: str | None) -> datetime:
     return moment.astimezone(ZoneInfo(tz or "Europe/Moscow"))
 
 
+def quote(lines: list[str], expandable: bool = False) -> str:
+    """A grey block; expandable ones show a few lines until tapped."""
+    items = [line for line in lines if line]
+    if not items:
+        return ""
+    tag = "<blockquote expandable>" if expandable else "<blockquote>"
+    return tag + "\n".join(items) + "</blockquote>"
+
+
+def blocks(*parts: str | None) -> str:
+    return "\n\n".join(p for p in parts if p)
+
+
+def day_label(d: date) -> str:
+    """'пн 19.10'"""
+    return f"{WEEKDAYS_SHORT[d.weekday()]} {d:%d.%m}"
+
+
 def obligation_line(o: Obligation, today: date) -> str:
     title = escape(o.title)
-    amount = format_rub(o.amount) if o.amount is not None else "сумма неизвестна (нет курса)"
+    if o.amount is not None:
+        amount = f"<b>{format_rub(o.amount)}</b>"
+    else:
+        amount = "сумма неизвестна (нет курса)"
     if o.original is not None:
         amount += f" ({format_money(*o.original)})"
     if o.state == State.OVERDUE:
         late = (today - o.date).days
         fine = f", пени {format_rub(o.penalty)}" if o.penalty else ""
-        return f"🔴 {title} — {amount} — просрочен на {count(late, DAYS)}{fine}"
+        return f"🔴 {title} — {amount} · просрочен на {count(late, DAYS)}{fine}"
     if o.state == State.AWAITING:
-        return f"⚠️ {title} — {amount} — ждёт оплаты (срок был {o.date:%d.%m})"
+        return f"⚠️ {title} — {amount} · ждёт оплаты с {o.date:%d.%m}"
     mark = "🔁" if o.source == Source.SUB else "💳"
-    auto = " · автосписание" if o.auto and o.source == Source.LOAN else ""
-    return f"{mark} {fmt_short(o.date)} — {title} — {amount}{auto}"
+    auto = " · ⟳ авто" if o.auto and o.source == Source.LOAN else ""
+    return f"{mark} {day_label(o.date)} · {title} — {amount}{auto}"
 
 
-def _subs_status(view: View, user: User, configured: bool) -> str | None:
+def subs_status(view: View, user: User, configured: bool) -> str | None:
     if not configured:
         return None
     subs = view.subs
@@ -54,72 +90,145 @@ def _subs_status(view: View, user: User, configured: bool) -> str | None:
     return f"<i>Подписки обновлены {stamp}</i>"
 
 
+def _money_block(view: View) -> str:
+    limit, today = view.limit, view.today
+    card = f"💳 На карте <b>{format_rub(view.card.amount_minor)}</b>"
+    if view.cash is not None and view.cash.amount_minor:
+        card += f" + наличные <b>{format_rub(view.cash.amount_minor)}</b>"
+    if view.card.on_date != today:
+        card += f" <i>(данные на {view.card.on_date:%d.%m})</i>"
+    lines = [card, f"📌 Обязательные до зарплаты: <b>{format_rub(limit.mandatory)}</b>"]
+    if view.payday is not None:
+        delayed = " (задерживается)" if view.payday.delayed else ""
+        lines.append(f"💵 Следующая выплата: {escape(view.payday.payout.label)}, "
+                     f"{fmt_date(limit.horizon)}{delayed} — через {count(limit.days, DAYS)}")
+    else:
+        lines.append(f"💵 Дата зарплаты не задана — считаю на {count(limit.days, DAYS)}")
+    if limit.unknown_amounts:
+        lines.append("⚠️ Для части подписок нет курса валюты — они не учтены.")
+    return quote(lines)
+
+
 def main_screen(view: View, user: User, subs_configured: bool) -> str:
     today = view.today
-    lines = []
+    parts = []
     if view.card is None or view.limit is None:
-        lines.append("Пришлите остаток на карте одним числом — и я посчитаю, "
+        parts.append("Пришлите остаток на карте одним числом — и я посчитаю, "
                      "сколько можно тратить в день.")
     else:
         limit = view.limit
-        lines.append(f"💰 <b>Можно тратить сегодня: {format_rub(limit.per_day)}</b>")
-        if limit.shortfall:
-            lines.append(f"⚠️ До зарплаты не хватает {format_rub(limit.shortfall)} "
+        parts.append(f"💰 Можно тратить сегодня: <b>{format_rub(limit.per_day)}</b>")
+        parts.append(_money_block(view))
+        if view.shortfall is not None:
+            parts.append(shortfall_banner(view.shortfall, today) + "\nЧто делать → /shortfall")
+        elif limit.shortfall:
+            parts.append(f"⚠️ <b>До зарплаты не хватает {format_rub(limit.shortfall)}</b> "
                          "на обязательные платежи.")
-        if view.payday is not None:
-            delayed = " (задерживается)" if view.payday.delayed else ""
-            lines.append(f"Следующая выплата: {escape(view.payday.payout.label)}, "
-                         f"{fmt_date(limit.horizon)}{delayed} — через {count(limit.days, DAYS)}")
-        else:
-            lines.append(f"Дата зарплаты не задана — считаю на {count(limit.days, DAYS)}.")
-        balance = f"На карте {format_rub(view.card.amount_minor)}"
-        if view.cash is not None and view.cash.amount_minor:
-            balance += f" + наличные {format_rub(view.cash.amount_minor)}"
-        if view.card.on_date != today:
-            balance += f" (данные на {view.card.on_date:%d.%m})"
-        lines.append(balance)
-        lines.append(f"Обязательные до зарплаты: {format_rub(limit.mandatory)}")
-        if limit.unknown_amounts:
-            lines.append("⚠️ Для части подписок нет курса валюты — они не учтены.")
+        if view.advice is not None:
+            parts.append(advice_line(view.advice)
+                         + "\n<i>«💳 Кредиты» → кредит → «⏩ Досрочно»</i>")
 
     late = [o for o in view.obligations if o.is_late]
     upcoming = [o for o in view.obligations if not o.is_late][:NEAREST_COUNT]
     if late or upcoming:
-        lines.append("")
-        lines.append("<b>Ближайшие платежи:</b>")
-        lines.extend(obligation_line(o, today) for o in [*late, *upcoming])
+        parts.append("📅 <b>Ближайшие платежи</b>\n"
+                     + quote([obligation_line(o, today) for o in [*late, *upcoming]]))
+    debt = []
     if view.loans_count:
-        lines.append("")
-        lines.append(f"Общий долг: <b>{format_rub(view.debt)}</b> "
-                     f"({count(view.loans_count, LOANS)})")
-    status = _subs_status(view, user, subs_configured)
-    if status:
-        lines.append(status)
-    return "\n".join(lines)
+        debt.append(f"📉 Общий долг: <b>{format_rub(view.debt)}</b> · "
+                    f"{count(view.loans_count, LOANS)}")
+    if view.closed_loans:
+        debt.append(progress_line(view.closed_loans, view.total_loans))
+    parts.append("\n".join(debt))
+    parts.append(subs_status(view, user, subs_configured))
+    return blocks(*parts)
+
+
+# --- shortfall and strategy ---------------------------------------------------------------
+
+
+def shortfall_banner(shortfall: Shortfall, today: date) -> str:
+    when = "Сегодня" if shortfall.day == today else fmt_words(shortfall.day)
+    return f"⚠️ <b>{when} не хватит {format_rub(shortfall.amount)}</b> на платежи."
+
+
+def shortfall_notice(shortfall: Shortfall, today: date) -> str:
+    titles = ", ".join(escape(o.title) for o in shortfall.items[:3])
+    return blocks(
+        shortfall_banner(shortfall, today),
+        quote([f"Под угрозой: {titles}."]) if titles else None,
+        "Разберёмся, что платить первым и что можно перенести.",
+    )
+
+
+GROUP_ADVICE = {
+    Group.URGENT: "платите первым: дневная ставка и пени растут быстрее всего. Если не "
+                  "успеваете — позвоните кредитору до даты платежа и спросите про "
+                  "пролонгацию (обычно платите только проценты, срок сдвигается).",
+    Group.BANK: "позвоните в банк до даты платежа: попросите перенос или реструктуризацию, "
+                "спросите про кредитные каникулы. Условия уточняйте у банка.",
+    Group.CARD: "внесите хотя бы минимальный платёж — иначе просрочка и штраф.",
+    Group.INSTALLMENT: "уточните у банка или магазина перенос: при просрочке рассрочка "
+                       "может стать кредитом с процентами.",
+    Group.SUBSCRIPTION: "можно отменить или поставить на паузу в боте подписок.",
+}
+
+
+def shortfall_screen(view: View, ranked: list[Obligation], cancel: list[Obligation]) -> str:
+    today, shortfall = view.today, view.shortfall
+    if shortfall is None:
+        return "✅ На ближайшие дни денег на обязательные платежи хватает."
+    order = quote([f"<b>{i}.</b> {obligation_line(o, today)}"
+                   for i, o in enumerate(ranked, 1)])
+    advice = quote([f"<b>{escape(o.title)}</b>: {GROUP_ADVICE[group_of(o, view.terms)]}"
+                    for o in ranked], expandable=True)
+    return blocks(
+        shortfall_banner(shortfall, today),
+        "📋 <b>Что платить в первую очередь</b>\n" + order,
+        "💬 <b>Что можно сделать</b>\n" + advice,
+        ("✂️ <b>Подписки, которые можно отменить или отложить</b>\n"
+         + quote([obligation_line(o, today) for o in cancel])) if cancel else None,
+        "<i>Это подсказки, а не юридическая консультация: условия переноса и "
+        "каникул зависят от кредитора.</i>",
+    )
+
+
+def advice_line(advice: Advice) -> str:
+    t = advice.target
+    return (f"💡 Свободно ≈ <b>{format_rub(advice.free)}</b> — выгоднее всего гасить досрочно "
+            f"«{escape(t.title)}» ({format_percent(str(t.annual_rate))}% годовых)")
+
+
+def progress_line(closed: int, total: int) -> str:
+    return f"🏁 Закрыто кредитов: <b>{closed} из {total}</b>"
+
+
+def closed_text(closed: int, total: int) -> str:
+    return f"🎉 <b>Кредит полностью погашен!</b> Закрыто кредитов: {closed} из {total}."
 
 
 def balance_reply(result: BalanceResult, amount: int) -> str:
-    lines = [f"Записал: на карте {format_rub(amount)}."]
+    lines = []
     report = result.report
     if report is not None:
         period = "со вчера" if report.days == 1 else f"за {count(report.days, DAYS)}"
         if report.spent >= 0:
-            lines.append(f"Потрачено {period}: <b>{format_rub(report.spent)}</b>")
+            lines.append(f"🛒 Потрачено {period}: <b>{format_rub(report.spent)}</b>")
         else:
             lines.append(
-                f"Денег стало больше, чем я ожидал, на {format_rub(-report.spent)}. "
+                f"📈 Денег стало больше, чем я ожидал, на {format_rub(-report.spent)}. "
                 "Если было поступление — запишите его: <code>+5000 премия</code>."
             )
         if report.sub_payments:
-            lines.append(f"Учтены списания подписок: {format_rub(report.sub_payments)}")
+            lines.append(f"🔁 Учтены списания подписок: {format_rub(report.sub_payments)}")
     for loan, due in result.settled:
-        lines.append(f"Учёл автосписание: {escape(loan.lender)} — "
+        lines.append(f"⟳ Учёл автосписание: {escape(loan.lender)} — "
                      f"{format_rub(due.amount_minor)} ({due.due_date:%d.%m})")
     for loan, due in result.unconfirmed:
         left = due.amount_minor - due.paid_minor
         lines.append(f"❓ Платёж {escape(loan.lender)} {format_rub(left)} "
                      f"({due.due_date:%d.%m}) — оплачен?")
-    return "\n".join(lines)
+    return blocks(f"✅ Записал: на карте <b>{format_rub(amount)}</b>", quote(lines))
 
 
 # --- loans --------------------------------------------------------------------------------
@@ -135,16 +244,15 @@ def format_rate(loan: Loan) -> str:
 
 
 def loan_button(loan: Loan, today: date) -> str:
-    return f"{loan.lender} · {format_rub(debt_of(loan, today))}"
+    return f"{KIND_ICONS[LoanKind(loan.kind)]} {loan.lender} · {format_rub(debt_of(loan, today))}"
 
 
 def loan_card(loan: Loan, today: date) -> str:
     kind = LoanKind(loan.kind)
-    lines = [f"<b>{escape(loan.lender)}</b> — {KIND_TITLES[kind]}"]
+    head = f"{KIND_ICONS[kind]} <b>{escape(loan.lender)}</b> · {KIND_TITLES[kind]}"
     if loan.status != "active":
-        lines.append("✅ Закрыт")
-        return "\n".join(lines)
-    lines.append(f"Долг: <b>{format_rub(debt_of(loan, today))}</b>")
+        return blocks(head, "✅ Закрыт")
+    lines = [f"Долг: <b>{format_rub(debt_of(loan, today))}</b>"]
     interest = interest_now(loan, today)
     if interest:
         lines.append(f"  из них проценты: {format_rub(interest)}")
@@ -157,22 +265,23 @@ def loan_card(loan: Loan, today: date) -> str:
         lines.append(f"{label}: {format_rub(loan.payment_minor)}, {loan.payment_day}-го числа")
     if loan.insurance_minor:
         lines.append(f"  в т. ч. страховка/комиссии: {format_rub(loan.insurance_minor)}")
-    lines.append("Оплата: " + ("автосписание" if loan.pay_method == "auto" else "вручную"))
+    lines.append("Оплата: " + ("⟳ автосписание" if loan.pay_method == "auto" else "вручную"))
     if loan.penalty_rate:
         lines.append(f"Пени при просрочке: {format_percent(loan.penalty_rate)}% годовых")
+    nearest = None
     due = next_due(loan)
     if due is not None:
         left = due.amount_minor - due.paid_minor
-        paid = f" (внесено {format_rub(due.paid_minor)})" if due.paid_minor else ""
-        lines.append(f"Ближайший платёж: {format_rub(left)} — {fmt_date(due.due_date)}, "
-                     f"{relative_days(due.due_date, today)}{paid}")
-    return "\n".join(lines)
+        paid = f" <i>(внесено {format_rub(due.paid_minor)})</i>" if due.paid_minor else ""
+        nearest = (f"📅 Ближайший платёж: <b>{format_rub(left)}</b> — {fmt_date(due.due_date)}, "
+                   f"{relative_days(due.due_date, today)}{paid}")
+    return blocks(head, quote(lines), nearest)
 
 
 def loan_draft_text(data: dict) -> str:
     kind = LoanKind(data["kind"])
-    lines = ["<b>Проверьте:</b>", f"{escape(data['lender'])} — {KIND_TITLES[kind]}",
-             f"Долг: {format_rub(data['principal'])}"]
+    lines = [f"{KIND_ICONS[kind]} <b>{escape(data['lender'])}</b> · {KIND_TITLES[kind]}",
+             f"Долг: <b>{format_rub(data['principal'])}</b>"]
     if kind != LoanKind.INSTALLMENT:
         unit = "% в день" if data["rate_unit"] == RateUnit.DAY else "% годовых"
         lines.append(f"Ставка: {format_percent(data['rate'])}{unit}")
@@ -183,40 +292,42 @@ def loan_draft_text(data: dict) -> str:
         lines.append(f"Платёж: {format_rub(data['payment'])}, ближайший {fmt_date(first_due)}")
     if data.get("insurance"):
         lines.append(f"  в т. ч. страховка/комиссии: {format_rub(data['insurance'])}")
-    lines.append("Оплата: " + ("автосписание" if data["pay_method"] == "auto" else "вручную"))
-    return "\n".join(lines)
+    lines.append("Оплата: " + ("⟳ автосписание" if data["pay_method"] == "auto" else "вручную"))
+    return blocks("📝 <b>Проверьте:</b>", quote(lines))
 
 
-def early_result_text(loan: Loan, result: EarlyResult) -> str:
+def early_result_text(loan: Loan, result: EarlyResult, progress: tuple[int, int]) -> str:
     alloc = result.allocation
-    lines = [f"Досрочный платёж по «{escape(loan.lender)}» записан."]
+    head = f"⏩ Досрочный платёж по «{escape(loan.lender)}» записан."
+    lines = []
     if alloc.interest:
         lines.append(f"На проценты: {format_rub(alloc.interest)}, "
                      f"на основной долг: {format_rub(alloc.principal)}")
     if result.closed:
-        lines.append("🎉 Кредит полностью погашен!")
-        return "\n".join(lines)
+        return blocks(head, quote(lines), closed_text(*progress))
     s = result.schedule
     if s is not None:
         if s.months_before and s.months_after is not None and s.months_after < s.months_before:
             lines.append(f"Срок сократился: осталось {count(s.months_after, MONTHS)} "
                          f"вместо {s.months_before}.")
-        lines.append(f"Платёж теперь: {format_rub(s.payment_after)}")
-    lines.append(f"Остаток долга: {format_rub(loan.principal_minor)}")
-    return "\n".join(lines)
+        lines.append(f"Платёж теперь: <b>{format_rub(s.payment_after)}</b>")
+    lines.append(f"Остаток долга: <b>{format_rub(loan.principal_minor)}</b>")
+    return blocks(head, quote(lines))
 
 
 def loan_reminder(loan: Loan, due: LoanDue, today: date) -> str:
     left = due.amount_minor - due.paid_minor
     when = relative_days(due.due_date, today)
-    head = f"⏰ {when.capitalize()} ({fmt_date(due.due_date)}) платёж: " \
-           f"<b>{escape(loan.lender)}</b> — {format_rub(left)}"
+    head = (f"⏰ <b>{when.capitalize()} платёж</b> ({fmt_date(due.due_date)})\n"
+            f"{escape(loan.lender)} — <b>{format_rub(left)}</b>")
     if loan.pay_method == "auto":
-        return head + "\nСпишется автоматически — проверьте, что на карте хватает денег."
-    return head + "\nОплата вручную. Когда оплатите — нажмите кнопку."
+        return blocks(head, "<i>Спишется автоматически — проверьте, что на карте хватает "
+                            "денег.</i>")
+    return blocks(head, "<i>Оплата вручную. Когда оплатите — нажмите кнопку.</i>")
 
 
-BALANCE_REMINDER = "Вечер — пришлите остаток на карте одним числом, и я посчитаю траты за день."
+BALANCE_REMINDER = ("🌙 Вечер — пришлите остаток на карте одним числом, "
+                    "и я посчитаю траты за день.")
 
 
 def payout_breakdown(payout: Payout, user: User) -> str:
@@ -233,35 +344,36 @@ def payout_lines(items: list[Payout], user: User) -> str:
     lines = []
     for p in items:
         breakdown = payout_breakdown(p, user)
-        extra = f" ({breakdown})" if breakdown else ""
-        lines.append(f"• {fmt_short(p.scheduled)} — {escape(p.label)} ≈ "
-                     f"{format_rub(p.amount)}{extra}")
-    return "\n".join(lines)
+        extra = f"\n   <i>{breakdown}</i>" if breakdown else ""
+        lines.append(f"💵 {day_label(p.scheduled)} · {escape(p.label)} ≈ "
+                     f"<b>{format_rub(p.amount)}</b>{extra}")
+    return quote(lines)
 
 
 def payday_question(payout: Payout, user: User, today: date) -> str:
     when = "Сегодня" if payout.scheduled == today else f"{fmt_date(payout.scheduled)} был"
-    text = (f"💵 {when} день выплаты: {escape(payout.label)}, "
-            f"ожидалось ≈ {format_rub(payout.amount)}")
+    text = (f"💵 <b>{when} день выплаты</b>\n"
+            f"{escape(payout.label)}, ожидалось ≈ <b>{format_rub(payout.amount)}</b>")
     breakdown = payout_breakdown(payout, user)
     if breakdown:
-        text += f" ({breakdown})"
-    return text + ". Деньги пришли?"
+        text += f"\n<i>{breakdown}</i>"
+    return blocks(text, "Деньги пришли?")
 
 
 def payday_summary(title: str, plan: PaydayPlan, today: date) -> str:
-    lines = [f"💵 {escape(title)}: пришло {format_rub(plan.received)}."]
+    head = f"💵 <b>{escape(title)}: пришло {format_rub(plan.received)}</b>"
     if plan.items:
-        lines.append(f"Сразу отложите <b>{format_rub(plan.set_aside)}</b> на платежи до "
-                     f"{fmt_date(plan.next_horizon)}:")
-        lines.extend(obligation_line(o, today) for o in plan.items)
+        items = [obligation_line(o, today) for o in plan.items]
         if plan.unknown_amounts:
-            lines.append("⚠️ Часть подписок без курса валюты — не учтены.")
+            items.append("⚠️ Часть подписок без курса валюты — не учтены.")
+        aside = (f"📌 Сразу отложите <b>{format_rub(plan.set_aside)}</b> на платежи до "
+                 f"{fmt_date(plan.next_horizon)}:\n" + quote(items))
     else:
-        lines.append(f"До {fmt_date(plan.next_horizon)} обязательных платежей нет.")
+        aside = f"До {fmt_date(plan.next_horizon)} обязательных платежей нет."
+    short = None
     if plan.free < 0:
-        lines.append(f"⚠️ Выплаты не хватает на платежи: минус {format_rub(-plan.free)}.")
-    return "\n".join(lines)
+        short = f"⚠️ <b>Выплаты не хватает на платежи: минус {format_rub(-plan.free)}</b>"
+    return blocks(head, aside, short)
 
 
 # --- settings -----------------------------------------------------------------------------
@@ -305,13 +417,21 @@ def income_text(user: User, rules: list[IncomeRule]) -> str:
 
 def settings_text(user: User, rules: list[IncomeRule]) -> str:
     shifts = f"{user.shift_work}/{user.shift_off}" if user.shift_work else "не задан"
-    return (
-        "<b>Настройки</b>\n"
-        f"Часовой пояс: {user.timezone or 'не задан'}\n"
-        f"График: {shifts}\n"
-        f"Выплаты: {income_text(user, rules)}\n"
-        f"Напоминания о платежах: в {user.remind_time:%H:%M}\n"
-        f"Напоминание про остаток: в {user.evening_time:%H:%M}"
+    return blocks(
+        "⚙️ <b>Настройки</b>",
+        quote([
+            f"🌍 Часовой пояс: {user.timezone or 'не задан'}",
+            f"📆 График: {shifts}",
+            f"💵 Выплаты: {income_text(user, rules)}",
+        ]),
+        quote([
+            f"🔔 Напоминания о платежах: в {user.remind_time:%H:%M}",
+            f"🌙 Напоминание про остаток: в {user.evening_time:%H:%M}",
+        ]),
+        quote([
+            f"🛟 Резерв на жизнь: {format_rub(user.reserve_per_day_minor)} в день",
+            f"💡 Советовать досрочку: от {format_rub(user.prepay_threshold_minor)}",
+        ]),
     )
 
 
@@ -321,3 +441,47 @@ def deployment_text(d: Deployment) -> str:
         return f"🔄 Бот обновлён до версии <code>{d.version[:7]}</code>{title}"
     return (f"⚠️ Обновление <code>{d.version[:7]}</code> не запустилось, "
             "бот вернулся на предыдущую версию.")
+
+
+# --- subscriptions ------------------------------------------------------------------------
+
+TOP_SUBS = 3
+
+
+def subs_screen(costs: list[MonthlyCost], income: int, loan_payments: int,
+                cancel: list[Obligation], status: str | None, today: date) -> str:
+    parts = []
+    if not costs:
+        parts.append("🔁 Активных подписок нет.")
+    else:
+        known = [c.rub_minor for c in costs if c.rub_minor is not None]
+        monthly = sum(known)
+        parts.append(f"🔁 <b>Подписки</b>: {len(costs)}, ≈ <b>{format_rub(monthly)}</b> в месяц")
+        info = []
+        disposable = income - loan_payments
+        if income and disposable > 0:
+            share = monthly * 100 / disposable
+            info.append(f"📊 Это <b>{share:.0f}%</b> располагаемого дохода")
+            info.append(f"<i>{format_rub(income)} в месяц − кредиты "
+                        f"{format_rub(loan_payments)}</i>")
+        elif income:
+            info.append("📊 Платежи по кредитам съедают весь доход — подписки сверху.")
+        else:
+            info.append("📊 Доход не настроен — долю от дохода не посчитать.")
+        if len(known) != len(costs):
+            info.append("⚠️ Для части подписок нет курса валюты — они не учтены.")
+        parts.append(quote(info))
+        top = []
+        for c in costs[:TOP_SUBS]:
+            amount = (f"<b>{format_rub(c.rub_minor)}</b>" if c.rub_minor is not None
+                      else "нет курса")
+            original = ""
+            if c.sub.currency != "RUB":
+                original = f" ({format_money(c.sub.amount_minor, c.sub.currency)})"
+            top.append(f"• {escape(c.sub.name)} — {amount} в месяц{original}")
+        parts.append("🏷 <b>Самые дорогие</b>\n" + quote(top))
+    if cancel:
+        parts.append("⚠️ <b>Денег на ближайшие платежи не хватает.</b> Можно отменить или "
+                     "отложить:\n" + quote([obligation_line(o, today) for o in cancel]))
+    parts.append(status)
+    return blocks(*parts)

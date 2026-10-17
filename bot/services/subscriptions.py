@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 
-from bot.services.money import RUB, to_rub_minor
+from bot.services.money import RUB, round_minor, to_rub_minor
 
 log = logging.getLogger(__name__)
 
@@ -26,6 +26,8 @@ class SubInfo:
     next_charge_date: date
     status: str
     auto_renew: bool
+    period_unit: str = "month"  # day / week / month / year
+    period_count: int = 1
 
 
 @dataclass(frozen=True)
@@ -71,6 +73,8 @@ def parse_subscriptions(payload) -> list[SubInfo]:
             # Unknown future statuses (e.g. trial) are kept as is and simply not counted
             status=str(s.get("status") or ""),
             auto_renew=bool(s.get("auto_renew", True)),
+            period_unit=str(s.get("period_unit") or "month"),
+            period_count=max(int(s.get("period_count") or 1), 1),
         ),
         "subscription",
     )
@@ -171,3 +175,35 @@ def paid_between(
         rub = convert(p.amount_minor, p.currency, p.charge_date, rates)
         total += rub or 0
     return total, chosen
+
+
+# Average months in a period unit: 365.25 days a year
+_MONTHS_PER_UNIT = {
+    "day": Decimal("12") / Decimal("365.25"),
+    "week": Decimal("12") / (Decimal("365.25") / 7),
+    "month": Decimal(1),
+    "year": Decimal(12),
+}
+
+
+@dataclass(frozen=True)
+class MonthlyCost:
+    sub: SubInfo
+    # Kopecks a month; None without an exchange rate or with an unknown period unit
+    rub_minor: int | None
+
+
+def monthly_costs(subs: list[SubInfo], today: date, rates: RateLookup) -> list[MonthlyCost]:
+    """What each active subscription costs a month on average, most expensive first."""
+    result = []
+    for s in subs:
+        if s.status != "active":
+            continue
+        months = _MONTHS_PER_UNIT.get(s.period_unit)
+        rub = convert(s.amount_minor, s.currency, today, rates)
+        monthly = None
+        if months is not None and rub is not None:
+            monthly = round_minor(Decimal(rub) / (months * s.period_count))
+        result.append(MonthlyCost(s, monthly))
+    result.sort(key=lambda c: (c.rub_minor is None, -(c.rub_minor or 0), c.sub.id))
+    return result

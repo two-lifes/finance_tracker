@@ -7,18 +7,22 @@ The unique key keeps every reminder at-most-once across restarts.
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.db.models import BalanceSnapshot, Loan, LoanDue, Notification, Payday, User
-from bot.services.budget import CARD, get_payday, pay_schedule, payday_records
+from bot.services.budget import CARD, build_view, get_payday, pay_schedule, payday_records
 from bot.services.dates import local_today
 from bot.services.work_calendar import due_today
 
 KIND_LOAN = "loan_{}"  # days before the due date
 KIND_BALANCE = "balance"
 KIND_PAYDAY = "payday"
+KIND_SHORTFALL = "shortfall"
 LOAN_OFFSETS = (3, 1)
+# Daily spending moves the gap a little every day: notify again only when it grows this much
+# (or by 10 %), or when the day the money runs out changes
+SHORTFALL_STEP = 100_000
 
 
 def moment(day: date, at: time, tz: str) -> datetime:
@@ -97,6 +101,26 @@ async def _plan_paydays(session: AsyncSession, user: User, today: date, now: dat
         await _ensure(session, user, KIND_PAYDAY, payday.id, today, "pending", now)
 
 
+async def _plan_shortfall(session: AsyncSession, user: User, today: date,
+                          now: datetime) -> None:
+    if now < moment(today, user.remind_time, user.timezone):
+        return
+    shortfall = (await build_view(session, user, today)).shortfall
+    if shortfall is None:
+        return
+    rubles = shortfall.amount // 100
+    last = await session.scalar(
+        select(func.max(Notification.ref_id)).where(
+            Notification.user_id == user.id,
+            Notification.kind == KIND_SHORTFALL,
+            Notification.for_date == shortfall.day,
+        )
+    )
+    if last is not None and rubles * 100 < last * 100 + max(SHORTFALL_STEP, last * 10):
+        return
+    await _ensure(session, user, KIND_SHORTFALL, rubles, shortfall.day, "pending", now)
+
+
 async def plan(session: AsyncSession, now: datetime) -> None:
     users = await session.scalars(select(User).where(User.timezone.is_not(None)))
     for user in users:
@@ -104,6 +128,7 @@ async def plan(session: AsyncSession, now: datetime) -> None:
         await _plan_loans(session, user, today, now)
         await _plan_balance(session, user, today, now)
         await _plan_paydays(session, user, today, now)
+        await _plan_shortfall(session, user, today, now)
 
 
 async def pending(session: AsyncSession) -> list[Notification]:
@@ -135,4 +160,6 @@ async def is_still_relevant(session: AsyncSession, n: Notification, user: User,
     if n.kind == KIND_PAYDAY:
         payday = await session.get(Payday, n.ref_id)
         return payday is not None and payday.status != "received" and n.for_date == today
+    if n.kind == KIND_SHORTFALL:
+        return (await build_view(session, user, today)).shortfall is not None
     return False

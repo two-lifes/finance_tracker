@@ -19,6 +19,8 @@ class Setup(StatesGroup):
     balance = State()
     remind_time = State()
     evening_time = State()
+    reserve = State()
+    threshold = State()
 
 
 SHIFTS_PROMPT = "Какой у вас график работы? Выберите или пришлите свой, например <code>4/3</code>."

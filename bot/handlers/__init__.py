@@ -1,6 +1,14 @@
 from aiogram import Router
 
-from bot.handlers import fallback, home, income, loans, pay_setup, start
+from bot.handlers import (
+    fallback,
+    home,
+    income,
+    loans,
+    pay_setup,
+    start,
+    subs,  # noqa: F401  # registers its entry points on menu_router
+)
 from bot.handlers.menu import menu_router
 
 

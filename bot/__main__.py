@@ -25,6 +25,8 @@ log = logging.getLogger(__name__)
 COMMANDS = [
     BotCommand(command="today", description="Сколько можно тратить сегодня"),
     BotCommand(command="loans", description="Кредиты"),
+    BotCommand(command="subs", description="Подписки: сколько в месяц"),
+    BotCommand(command="shortfall", description="Не хватает денег: что платить первым"),
     BotCommand(command="settings", description="Настройки"),
     BotCommand(command="cancel", description="Отменить текущее действие"),
 ]

@@ -27,7 +27,7 @@ from bot.keyboards import (
 from bot.services.budget import CARD, income_rules, save_snapshot
 from bot.services.dates import parse_time
 from bot.services.deployments import list_deployments
-from bot.services.money import parse_rub
+from bot.services.money import format_rub, parse_rub
 from bot.services.tz import parse_timezone
 from bot.services.work_calendar import default_anchor, parse_pattern
 from bot.views import deployment_text, settings_text
@@ -231,6 +231,51 @@ async def settings_evening(callback: CallbackQuery, state: FSMContext, user: Use
         "остаток, если вы его ещё не прислали? Например <code>21:00</code>.\n/cancel — отмена"
     )
     await callback.answer()
+
+
+@router.callback_query(F.data == "settings:reserve")
+async def settings_reserve(callback: CallbackQuery, state: FSMContext, user: User) -> None:
+    await state.clear()
+    await state.set_state(Setup.reserve)
+    await callback.message.answer(
+        f"Сейчас: {format_rub(user.reserve_per_day_minor)} в день. Сколько оставлять на жизнь "
+        "в день до зарплаты, прежде чем советовать досрочное погашение? Например "
+        "<code>1000</code>.\n/cancel — отмена"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "settings:threshold")
+async def settings_threshold(callback: CallbackQuery, state: FSMContext, user: User) -> None:
+    await state.clear()
+    await state.set_state(Setup.threshold)
+    await callback.message.answer(
+        f"Сейчас: {format_rub(user.prepay_threshold_minor)}. С какой суммы свободных денег "
+        "советовать досрочное погашение? Например <code>1000</code>.\n/cancel — отмена"
+    )
+    await callback.answer()
+
+
+async def _set_amount(message: Message, state: FSMContext, session: AsyncSession, user: User,
+                      field: str) -> None:
+    value = parse_rub(message.text)
+    if value is None:
+        await message.answer("Нужна сумма, например <code>1000</code>.")
+        return
+    setattr(user, field, value)
+    await back_to_settings(message, state, session, user)
+
+
+@router.message(Setup.reserve, F.text)
+async def type_reserve(message: Message, state: FSMContext, session: AsyncSession,
+                       user: User) -> None:
+    await _set_amount(message, state, session, user, "reserve_per_day_minor")
+
+
+@router.message(Setup.threshold, F.text)
+async def type_threshold(message: Message, state: FSMContext, session: AsyncSession,
+                         user: User) -> None:
+    await _set_amount(message, state, session, user, "prepay_threshold_minor")
 
 
 async def _set_time(message: Message, state: FSMContext, session: AsyncSession, user: User,

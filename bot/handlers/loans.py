@@ -44,13 +44,21 @@ from bot.services.loan_ops import (
     create_loan,
     early_repay,
     interest_now,
+    loan_progress,
     next_due,
     pay_due,
     regenerate_dues,
 )
 from bot.services.loans import EarlyMode, LoanKind, RateUnit, Schedule
 from bot.services.money import format_rub, parse_rub
-from bot.views import early_result_text, loan_button, loan_card, loan_draft_text
+from bot.views import (
+    closed_text,
+    early_result_text,
+    loan_button,
+    loan_card,
+    loan_draft_text,
+    progress_line,
+)
 
 router = Router(name="loans")
 
@@ -139,10 +147,15 @@ async def _refreshed(session: AsyncSession, loan: Loan) -> Loan:
 async def _list_view(session: AsyncSession, user: User):
     today = user_today(user.timezone)
     loans = await active_loans(session, user)
+    closed, total = await loan_progress(session, user)
     if loans:
-        text = "<b>Кредиты</b>\nНажмите на кредит, чтобы открыть его."
+        text = "💳 <b>Кредиты</b>\n<i>Нажмите на кредит, чтобы открыть его.</i>"
+    elif closed:
+        text = "Активных кредитов нет."
     else:
         text = "Кредитов пока нет. Добавьте их — и я буду напоминать о платежах."
+    if closed:
+        text += "\n" + progress_line(closed, total)
     return text, loans_keyboard([(loan.id, loan_button(loan, today)) for loan in loans])
 
 
@@ -414,7 +427,7 @@ async def pay_amount(message: Message, state: FSMContext, session: AsyncSession,
         await state.clear()
         text = f"✅ {escape(loan.lender)}: оплачено {format_rub(min(amount, left))}."
         if result.closed:
-            text += "\n🎉 Кредит полностью погашен!"
+            text += "\n" + closed_text(*await loan_progress(session, user))
         await message.answer(text)
         return
     await message.answer(f"✅ Платёж {format_rub(left)} записан. "
@@ -433,7 +446,7 @@ async def _early_next(message: Message, state: FSMContext, session: AsyncSession
     await state.clear()
     result = await early_repay(session, loan, amount, EarlyMode.TERM,
                                user_today(user.timezone), utcnow())
-    await message.answer(early_result_text(loan, result))
+    await message.answer(early_result_text(loan, result, await loan_progress(session, user)))
 
 
 @router.callback_query(LoanCb.filter(F.action == "early"))
@@ -481,7 +494,9 @@ async def early_mode(callback: CallbackQuery, callback_data: EarlyCb, state: FSM
         return
     result = await early_repay(session, loan, data["amount"], EarlyMode(callback_data.mode),
                                user_today(user.timezone), utcnow())
-    await callback.message.answer(early_result_text(loan, result))
+    await callback.message.answer(
+        early_result_text(loan, result, await loan_progress(session, user))
+    )
 
 
 # --- close / delete -----------------------------------------------------------------------
@@ -514,7 +529,7 @@ async def do_close_delete(callback: CallbackQuery, callback_data: LoanCb,
         return
     if callback_data.action == "close_yes":
         await close_loan(session, loan, utcnow())
-        await callback.answer("🎉 Закрыт")
+        await callback.answer(closed_text(*await loan_progress(session, user)))
     else:
         await session.delete(loan)
         await session.flush()

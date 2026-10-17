@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -347,6 +347,15 @@ async def active_loans(session: AsyncSession, user: User) -> list[Loan]:
             .order_by(Loan.id)
         )
     )
+
+
+async def loan_progress(session: AsyncSession, user: User) -> tuple[int, int]:
+    """(closed, all) loans, for "закрыто X из N"."""
+    rows = await session.execute(
+        select(Loan.status, func.count()).where(Loan.user_id == user.id).group_by(Loan.status)
+    )
+    counts = dict(rows.all())
+    return counts.get("closed", 0), sum(counts.values())
 
 
 def due_infos(loans: list[Loan]) -> list[DueInfo]:

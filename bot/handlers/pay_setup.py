@@ -23,7 +23,7 @@ from bot.keyboards import (
 from bot.services.budget import income_rules, pay_schedule, save_rules, work_pattern
 from bot.services.money import parse_rub
 from bot.services.work_calendar import describe_periods, parse_cuts, payouts
-from bot.views import income_text, payout_lines
+from bot.views import income_text, payout_lines, quote
 
 router = Router(name="pay_setup")
 
@@ -121,7 +121,7 @@ async def _single(state: FSMContext) -> bool:
 async def _income_view(message: Message, state: FSMContext, session: AsyncSession,
                        user: User, edit: CallbackQuery | None = None) -> None:
     await state.clear()
-    text = f"<b>Выплаты</b>\n{income_text(user, await income_rules(session, user))}"
+    text = "💵 <b>Выплаты</b>\n" + quote([income_text(user, await income_rules(session, user))])
     preview = await _preview(session, user)
     if preview:
         text += "\n\n" + preview
@@ -138,7 +138,7 @@ async def _preview(session: AsyncSession, user: User) -> str:
     upcoming = payouts(schedule, today, today + timedelta(days=PREVIEW_DAYS))[:3]
     if not upcoming:
         return ""
-    return "Ближайшие выплаты:\n" + payout_lines(upcoming, user)
+    return "📅 <b>Ближайшие выплаты</b>\n" + payout_lines(upcoming, user)
 
 
 # --- entry points -------------------------------------------------------------------------

@@ -6,6 +6,7 @@ import itertools
 import re
 from datetime import date
 from functools import cache
+from html.parser import HTMLParser
 
 from aiogram import Bot
 from sqlalchemy import select
@@ -48,6 +49,36 @@ class FakeSubsClient:
                 if start.isoformat() <= p["charge_date"] <= end.isoformat()]
 
 
+TELEGRAM_TAGS = {"b", "i", "u", "s", "code", "pre", "a", "blockquote", "tg-spoiler"}
+
+
+class _TagChecker(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.stack: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        assert tag in TELEGRAM_TAGS, f"<{tag}> is not Telegram HTML"
+        assert not (tag == "blockquote" and "blockquote" in self.stack), "nested blockquote"
+        self.stack.append(tag)
+
+    def handle_endtag(self, tag: str) -> None:
+        assert self.stack and self.stack[-1] == tag, f"unbalanced </{tag}>"
+        self.stack.pop()
+
+
+def check_telegram_html(text: str) -> None:
+    checker = _TagChecker()
+    checker.feed(text)
+    checker.close()
+    assert not checker.stack, f"unclosed {checker.stack} in {text!r}"
+
+
+def plain(text: str) -> str:
+    """Tests compare plain text: no HTML tags, ordinary spaces instead of NBSP in amounts."""
+    return re.sub(r"<[^>]+>", "", text).replace(NBSP, " ")
+
+
 class Harness:
     def __init__(self, dp, bot, net, sessionmaker, clock):
         self.dp, self.bot, self.net, self.sessionmaker = dp, bot, net, sessionmaker
@@ -67,11 +98,13 @@ class Harness:
         return self._last_since(before)
 
     def _last_since(self, before: int) -> str | None:
-        # Tests compare plain text: no HTML tags, ordinary spaces instead of NBSP in amounts
         texts = self.net.texts()
         if len(texts) <= before:
             return None
-        return re.sub(r"<[^>]+>", "", texts[-1]).replace(NBSP, " ")
+        return plain(texts[-1])
+
+    def last_plain(self) -> str:
+        return plain(self.net.last_text())
 
     async def tap(self, data: str) -> str | None:
         before = len(self.net.texts())

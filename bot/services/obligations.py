@@ -48,6 +48,7 @@ class Obligation:
     penalty: int = 0
     # Original amount for foreign-currency subscriptions
     original: tuple[int, str] | None = None
+    loan_id: int | None = None
 
     @property
     def is_late(self) -> bool:
@@ -73,7 +74,8 @@ def loan_obligations(dues: list[DueInfo], today: date) -> list[Obligation]:
             fine = penalty(remaining, d.penalty_rate, overdue_days(d.due_date, today))
         result.append(
             Obligation(
-                Source.LOAN, d.id, d.title, d.due_date, remaining + fine, state, d.auto, fine
+                Source.LOAN, d.id, d.title, d.due_date, remaining + fine, state, d.auto, fine,
+                loan_id=d.loan_id,
             )
         )
     return result

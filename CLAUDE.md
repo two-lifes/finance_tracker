@@ -14,7 +14,8 @@ Russian. Subscriptions are read-only from the subs_tracker bot's HTTP API.
 
 ## Layout
 - `bot/services/` — logic. Pure (no I/O, unit-tested): `money`, `plural`, `dates`, `work_calendar`,
-  `loans`, `subscriptions`, `obligations`, `limit`, `fx`. DB-backed: `loan_ops`, `budget`,
+  `loans`, `subscriptions`, `obligations`, `limit`, `fx`, `forecast` (5-day shortfall),
+  `priority` (what to pay first), `strategy` (avalanche). DB-backed: `loan_ops`, `budget`,
   `external` (API/CBR cache), `notifications`.
 - `bot/handlers/` — Telegram; `bot/views.py` — all message texts; `bot/keyboards/` — buttons.
 - `bot/scheduler.py` — 60 s loop: subscription sync (hourly), CBR rates (daily), reminders.

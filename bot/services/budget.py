@@ -1,7 +1,7 @@
 """Puts it all together from the DB: balances, spending, paydays, the main screen."""
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import func, or_, select
@@ -22,9 +22,19 @@ from bot.db.models import (
 )
 from bot.services import work_calendar as wc
 from bot.services.external import SubsData, load_subs, rate_lookup
+from bot.services.forecast import Shortfall, forecast
 from bot.services.limit import Limit, compute_limit, default_horizon, spending
-from bot.services.loan_ops import active_loans, debt_of, due_infos, settle_auto_debits
+from bot.services.loan_ops import (
+    active_loans,
+    debt_of,
+    due_infos,
+    loan_progress,
+    settle_auto_debits,
+)
+from bot.services.loans import LoanKind, RateUnit, Schedule, effective_annual_rate
 from bot.services.obligations import Obligation, loan_obligations, merge, sub_obligations
+from bot.services.priority import LoanTerms
+from bot.services.strategy import Advice, Candidate, advise, free_money
 from bot.services.subscriptions import SubPayment, paid_between, pending_charges
 
 CARD = "card"
@@ -316,6 +326,12 @@ class View:
     debt: int
     loans_count: int
     subs: SubsData
+    shortfall: Shortfall | None
+    # Early repayment suggestion; never while money is short
+    advice: Advice | None
+    closed_loans: int
+    total_loans: int
+    terms: dict[int, LoanTerms]
 
     @property
     def balance(self) -> int:
@@ -333,6 +349,30 @@ async def obligations_for(
     return merge(loan_obligations(due_infos(loans), today), sub_obligations(charges))
 
 
+def annual_rate(loan: Loan) -> Decimal:
+    return effective_annual_rate(Decimal(loan.rate), RateUnit(loan.rate_unit))
+
+
+def loan_terms(loans: list[Loan]) -> dict[int, LoanTerms]:
+    return {loan.id: LoanTerms(LoanKind(loan.kind), annual_rate(loan)) for loan in loans}
+
+
+def prepay_candidates(loans: list[Loan], today: date) -> list[Candidate]:
+    return [Candidate(loan.id, loan.lender, annual_rate(loan), debt_of(loan, today))
+            for loan in loans]
+
+
+def expected_incomes(paydays: list[wc.ExpectedPayday]) -> list[tuple[date, int]]:
+    """Paydays the forecast may count on: a delayed salary is not money yet."""
+    return [(p.effective, p.payout.amount) for p in paydays if not p.delayed]
+
+
+def advice_for(user: User, loans: list[Loan], spare: int, days: int,
+               today: date) -> Advice | None:
+    free = free_money(spare, 0, user.reserve_per_day_minor, days)
+    return advise(free, user.prepay_threshold_minor, prepay_candidates(loans, today))
+
+
 async def build_view(session: AsyncSession, user: User, today: date) -> View:
     loans = await active_loans(session, user)
     subs = await load_subs(session)
@@ -341,14 +381,34 @@ async def build_view(session: AsyncSession, user: User, today: date) -> View:
     payday = paydays[0] if paydays else None
     card = await latest_snapshot(session, user, CARD)
     cash = await latest_snapshot(session, user, CASH)
-    limit = None
+    limit = shortfall = advice = None
     if card is not None:
         horizon = payday.effective if payday else default_horizon(today)
         balance = card.amount_minor + (cash.amount_minor if cash else 0)
         limit = compute_limit(balance, obligations, today, horizon)
+        shortfall = forecast(balance, obligations, expected_incomes(paydays), today)
+        if shortfall is None and not limit.shortfall:
+            advice = advice_for(user, loans, limit.free, limit.days, today)
     penalties = sum(o.penalty for o in obligations)
     debt = sum(debt_of(loan, today) for loan in loans) + penalties
-    return View(today, card, cash, obligations, payday, limit, debt, len(loans), subs)
+    closed, total = await loan_progress(session, user)
+    return View(today, card, cash, obligations, payday, limit, debt, len(loans), subs,
+                shortfall, advice, closed, total, loan_terms(loans))
+
+
+# --- subscriptions budget -----------------------------------------------------------------
+
+
+async def monthly_income(session: AsyncSession, user: User, today: date) -> int:
+    """Average income a month from the pay settings (hourly pay: by the shift pattern)."""
+    schedule = await pay_schedule(session, user)
+    year = wc.payouts(schedule, today, today + timedelta(days=364))
+    return sum(p.amount for p in year) // 12
+
+
+def monthly_loan_payments(loans: list[Loan]) -> int:
+    """Regular monthly payments; one-off loans (МФО) are not a monthly expense."""
+    return sum(loan.payment_minor for loan in loans if loan.schedule == Schedule.MONTHLY)
 
 
 async def record_debt_history(session: AsyncSession, user: User, today: date) -> None:

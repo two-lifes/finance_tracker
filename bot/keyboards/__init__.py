@@ -10,6 +10,7 @@ BTN_HOME = "🏠 Главная"
 BTN_LOANS = "💳 Кредиты"
 BTN_INCOME = "➕ Доход"
 BTN_SETTINGS = "⚙️ Настройки"
+BTN_SUBS = "🔁 Подписки"
 
 # Russian time zones, west to east
 RU_TIMEZONES = [
@@ -55,9 +56,9 @@ class PaydayCb(CallbackData, prefix="pday"):
 
 def main_menu() -> ReplyKeyboardMarkup:
     builder = ReplyKeyboardBuilder()
-    for text in (BTN_HOME, BTN_LOANS, BTN_INCOME, BTN_SETTINGS):
+    for text in (BTN_HOME, BTN_LOANS, BTN_INCOME, BTN_SUBS, BTN_SETTINGS):
         builder.button(text=text)
-    builder.adjust(2)
+    builder.adjust(2, 2, 1)
     return builder.as_markup(resize_keyboard=True, input_field_placeholder="Остаток на карте")
 
 
@@ -102,6 +103,8 @@ def settings_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="Выплаты", callback_data="settings:income")
     builder.button(text="Время напоминаний", callback_data="settings:remind")
     builder.button(text="Время про остаток", callback_data="settings:evening")
+    builder.button(text="Резерв на жизнь", callback_data="settings:reserve")
+    builder.button(text="Порог досрочки", callback_data="settings:threshold")
     builder.button(text="🔄 Обновления", callback_data="settings:updates")
     builder.adjust(2)
     return builder.as_markup()
@@ -218,6 +221,19 @@ def payday_keyboard(payday_id: int, amount: int) -> InlineKeyboardMarkup:
     builder.button(text="Задерживается",
                    callback_data=PaydayCb(action="delay", payday_id=payday_id))
     builder.adjust(1)
+    return builder.as_markup()
+
+
+def shortfall_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Что делать", callback_data="short:plan")
+    return builder.as_markup()
+
+
+def prepay_keyboard(loan_id: int, title: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text=f"⏩ Досрочно в {title}", callback_data=LoanCb(action="early",
+                                                                     loan_id=loan_id))
     return builder.as_markup()
 
 

@@ -24,9 +24,10 @@ from bot.services.budget import (
     save_snapshot,
 )
 from bot.services.external import fx_refresh_due, load_subs, refresh_rates, sync_subs
-from bot.services.loan_ops import pay_due, undo_auto_debit
+from bot.services.loan_ops import loan_progress, pay_due, undo_auto_debit
 from bot.services.money import format_rub, parse_rub
-from bot.views import balance_reply, main_screen
+from bot.services.priority import cancel_candidates, rank
+from bot.views import balance_reply, closed_text, main_screen, shortfall_screen
 
 router = Router(name="home")
 
@@ -67,6 +68,28 @@ async def show_home(
         await message.answer("Сначала короткая настройка: /start")
         return
     await message.answer(await home_text(session, user, subs_client), reply_markup=main_menu())
+
+
+async def shortfall_text(session: AsyncSession, user: User) -> str:
+    view = await build_view(session, user, user_today(user.timezone))
+    items = view.shortfall.items if view.shortfall is not None else []
+    return shortfall_screen(view, rank(items, view.terms, view.today), cancel_candidates(items))
+
+
+@menu_router.message(Command("shortfall"))
+async def show_shortfall(message: Message, state: FSMContext, session: AsyncSession,
+                         user: User) -> None:
+    await state.clear()
+    if user.timezone is None:
+        await message.answer("Сначала короткая настройка: /start")
+        return
+    await message.answer(await shortfall_text(session, user))
+
+
+@router.callback_query(F.data == "short:plan")
+async def shortfall_button(callback: CallbackQuery, session: AsyncSession, user: User) -> None:
+    await callback.answer()
+    await callback.message.answer(await shortfall_text(session, user))
 
 
 # Free text is read only outside dialogs: inside one it is the answer to the dialog
@@ -165,5 +188,5 @@ async def due_paid(callback: CallbackQuery, callback_data: DueCb, session: Async
     await drop_buttons(callback)
     text = f"✅ {escape(loan.lender)}: оплачено {format_rub(left)}."
     if result.closed:
-        text += "\n🎉 Кредит полностью погашен!"
+        text += "\n" + closed_text(*await loan_progress(session, user))
     await callback.message.answer(text)

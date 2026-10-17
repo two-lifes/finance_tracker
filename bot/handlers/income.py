@@ -17,9 +17,10 @@ from bot.clock import user_today, utcnow
 from bot.db.models import IncomeRule, Payday, User
 from bot.handlers.common import drop_buttons
 from bot.handlers.menu import menu_router
-from bot.keyboards import BTN_INCOME, PaydayCb, delay_keyboard, main_menu
+from bot.keyboards import BTN_INCOME, PaydayCb, delay_keyboard, main_menu, prepay_keyboard
 from bot.services.budget import (
     add_income,
+    advice_for,
     build_view,
     get_payday,
     payout_of,
@@ -28,8 +29,9 @@ from bot.services.budget import (
 )
 from bot.services.dates import fmt_date, parse_date
 from bot.services.limit import default_horizon, payday_plan
+from bot.services.loan_ops import active_loans
 from bot.services.money import format_rub, parse_rub
-from bot.views import payday_summary
+from bot.views import advice_line, payday_summary
 
 router = Router(name="income")
 
@@ -137,9 +139,17 @@ async def _receive(message: Message, session: AsyncSession, user: User, payday: 
     horizon = paydays[0].effective if paydays else default_horizon(today)
     view = await build_view(session, user, today)
     plan = payday_plan(amount, view.obligations, horizon)
-    await message.answer(payday_summary(label, plan, today) +
-                         "\n\nПришлите остаток на карте — пересчитаю лимит.",
-                         reply_markup=main_menu())
+    text = payday_summary(label, plan, today)
+    advice = None
+    if view.shortfall is None:
+        days = max((horizon - today).days, 1)
+        advice = advice_for(user, await active_loans(session, user), plan.free, days, today)
+    if advice is not None:
+        text += "\n\n" + advice_line(advice) + "."
+    text += "\n\nПришлите остаток на карте — пересчитаю лимит."
+    markup = (prepay_keyboard(advice.target.loan_id, advice.target.title[:30])
+              if advice is not None else main_menu())
+    await message.answer(text, reply_markup=markup)
 
 
 @router.callback_query(PaydayCb.filter(F.action == "yes"))

@@ -45,6 +45,12 @@ class User(Base):
     # before / after / same: payday on a weekend
     weekend_shift: Mapped[str] = mapped_column(String(6), default="before",
                                                server_default="before")
+    # Spare money = balance − payments − this × days until payday
+    reserve_per_day_minor: Mapped[int] = mapped_column(BigInteger, default=100_000,
+                                                       server_default="100000")
+    # Early repayment is suggested only from this much spare money
+    prepay_threshold_minor: Mapped[int] = mapped_column(BigInteger, default=100_000,
+                                                        server_default="100000")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -211,7 +217,8 @@ class Notification(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
-    # loan_3 / loan_1 (ref: due id), balance (ref 0), payday (ref: payday id)
+    # loan_3 / loan_1 (ref: due id), balance (ref 0), payday (ref: payday id),
+    # shortfall (ref: amount in whole rubles, for_date: the day money runs out)
     kind: Mapped[str] = mapped_column(String(12))
     ref_id: Mapped[int] = mapped_column(Integer)
     for_date: Mapped[date] = mapped_column(Date)

@@ -13,7 +13,7 @@ from bot.db.models import (
     User,
 )
 from bot.keyboards import BTN_HOME, DueCb, EarlyCb, LoanCb
-from tests.harness import onboard
+from tests.harness import onboard, plain
 from tests.tg_fakes import STRANGER_ID
 
 
@@ -80,8 +80,7 @@ async def test_add_loan_and_dues(h):
     text = await h.text(BTN_HOME)
     # (20 000 − 10 000) / 6 = 1 666 ₽
     assert "Можно тратить сегодня: 1 666 ₽" in text
-    assert "20.10, вт — Сбер" in text
-    assert "автосписание" in text
+    assert "вт 20.10 · Сбер — 10 000 ₽ · ⟳ авто" in text
 
 
 async def test_mfo_single_payment(h):
@@ -479,7 +478,7 @@ async def test_hourly_payday_question_shows_estimate(h, now):
     now.set(datetime(2026, 10, 20, 7, 0, tzinfo=UTC))
     await h.tick()
     question = h.net.sent()[-1]
-    text = question.text.replace(" ", " ")
+    text = plain(question.text)
     # 2/2 with 17.10 as 1st shift: 1–10 October has 6 shifts (1, 2, 5, 6, 9, 10)
     assert "Зарплата за 01.10–10.10, ожидалось ≈ 18 792 ₽" in text
     assert "6 смен × 12 ч × 300 ₽ − 13%" in text
