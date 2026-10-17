@@ -273,9 +273,12 @@ def weekend_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def income_settings_keyboard(hourly: bool) -> InlineKeyboardMarkup:
+def income_settings_keyboard(hourly: bool, has_income: bool) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="Настроить заново", callback_data="iset:all")
+    builder.button(text="Настроить заново" if has_income else "Настроить",
+                   callback_data="iset:all")
+    if has_income:
+        builder.button(text="🚫 Сейчас нет дохода", callback_data="iset:none")
     if hourly:
         builder.button(text="Ставка", callback_data="iset:rate")
         builder.button(text="Часы в смене", callback_data="iset:hours")
@@ -284,5 +287,5 @@ def income_settings_keyboard(hourly: bool) -> InlineKeyboardMarkup:
         builder.button(text="Через сколько дней", callback_data="iset:delay")
     builder.button(text="Выплата в выходной", callback_data="iset:weekend")
     builder.button(text="« Настройки", callback_data="settings:back")
-    builder.adjust(1, 2)
+    builder.adjust(*((1, 1, 2) if has_income else (1, 2)))
     return builder.as_markup()

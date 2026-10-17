@@ -2,10 +2,15 @@
 
 from datetime import UTC, datetime
 
-from bot.db.models import Deployment, Loan, Notification, User
+from bot.db.models import Deployment, IncomeRule, Loan, Notification, User
 from bot.keyboards import BTN_HOME, BTN_LOANS, BTN_SUBS, LoanCb
 from tests.harness import onboard, plain
-from tests.test_flows import add_loan, sub_json
+from tests.test_flows import add_loan, onboard_hourly, sub_json
+
+
+def last_buttons(h) -> list[str]:
+    markup = [r.reply_markup for r in h.net.requests if getattr(r, "reply_markup", None)][-1]
+    return [b.callback_data for row in markup.inline_keyboard for b in row]
 
 
 def shortfall_texts(h) -> list[str]:
@@ -157,3 +162,37 @@ async def test_updates_history_shows_when(h):
     text = await h.tap("settings:updates")
     assert text.index("bbbbbbb · 1 час назад") < text.index("aaaaaaa · вчера в 15:50")
     assert "Stage 2" in text
+
+
+async def test_remove_income_when_job_is_lost(h, now):
+    await onboard(h, balance="20000")
+    await h.tap("settings:income")
+    assert "iset:none" in last_buttons(h)
+    assert "Убрать выплаты?" in await h.tap("iset:none")
+    # Changed mind: back to the pay settings, nothing removed
+    await h.tap("settings:income")
+    assert len(await h.all(IncomeRule)) == 1
+
+    await h.tap("iset:none")
+    text = await h.tap("iset:none_yes")
+    assert "не заданы" in text
+    assert await h.all(IncomeRule) == []
+    [user] = await h.all(User)
+    assert user.income_mode == "fixed"
+    assert "Дата зарплаты не задана — считаю на 30 дней" in await h.text(BTN_HOME)
+
+    # The old payday never comes up again
+    now.set(datetime(2026, 10, 23, 8, 0, tzinfo=UTC))
+    await h.tick()
+    assert not [t for t in h.net.texts() if "Деньги пришли?" in t]
+
+
+async def test_remove_hourly_income(h):
+    await onboard_hourly(h)
+    await h.text("20000")
+    await h.tap("iset:none_yes")
+    assert await h.all(IncomeRule) == []
+    [user] = await h.all(User)
+    # Kept for setting up again later
+    assert (user.income_mode, user.hourly_rate_minor) == ("fixed", 30000)
+    assert "Дата зарплаты не задана" in await h.text(BTN_HOME)

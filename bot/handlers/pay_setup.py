@@ -19,6 +19,7 @@ from bot.keyboards import (
     income_type_keyboard,
     tax_keyboard,
     weekend_keyboard,
+    yes_no_keyboard,
 )
 from bot.services.budget import income_rules, pay_schedule, save_rules, work_pattern
 from bot.services.money import parse_rub
@@ -121,11 +122,12 @@ async def _single(state: FSMContext) -> bool:
 async def _income_view(message: Message, state: FSMContext, session: AsyncSession,
                        user: User, edit: CallbackQuery | None = None) -> None:
     await state.clear()
-    text = "💵 <b>Выплаты</b>\n" + quote([income_text(user, await income_rules(session, user))])
+    rules = await income_rules(session, user)
+    text = "💵 <b>Выплаты</b>\n" + quote([income_text(user, rules)])
     preview = await _preview(session, user)
     if preview:
         text += "\n\n" + preview
-    markup = income_settings_keyboard(user.income_mode == "hourly")
+    markup = income_settings_keyboard(user.income_mode == "hourly", bool(rules))
     if edit is not None:
         await show(edit, text, markup)
     else:
@@ -156,6 +158,30 @@ async def setup_again(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await state.clear()
     await ask_income_type(callback.message, state)
+
+
+@router.callback_query(F.data == "iset:none")
+async def ask_no_income(callback: CallbackQuery) -> None:
+    await callback.answer()
+    await show(
+        callback,
+        "🚫 <b>Убрать выплаты?</b>\n"
+        + quote(["Бот перестанет ждать зарплату и спрашивать о ней.",
+                 "Лимит на день будет считаться на 30 дней вперёд.",
+                 "Уже полученные деньги останутся в учёте."])
+        + "\n\nКогда появится новая работа — «Настроить» в этом же разделе.",
+        yes_no_keyboard("iset:none_yes", "settings:income"),
+    )
+
+
+@router.callback_query(F.data == "iset:none_yes")
+async def no_income(callback: CallbackQuery, state: FSMContext, session: AsyncSession,
+                    user: User) -> None:
+    await callback.answer("Выплаты убраны")
+    await save_rules(session, user, [])
+    # Hourly settings stay: setting up again after a short break reuses them as a start
+    user.income_mode = "fixed"
+    await _income_view(callback.message, state, session, user, edit=callback)
 
 
 _SINGLE_PROMPTS = {
