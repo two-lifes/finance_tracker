@@ -212,6 +212,20 @@ def balance_keyboard(
     return builder.as_markup() if settled or unconfirmed else None
 
 
+def balance_reminder_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✍️ Записать", callback_data="bal:start")
+    return builder.as_markup()
+
+
+def unchanged_keyboard(amount: int | None) -> InlineKeyboardMarkup | None:
+    if amount is None:
+        return None
+    builder = InlineKeyboardBuilder()
+    builder.button(text=f"Без изменений ({format_rub(amount)})", callback_data="bal:same")
+    return builder.as_markup()
+
+
 def payday_keyboard(payday_id: int, amount: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text=f"Да, {format_rub(amount)}",

@@ -326,8 +326,11 @@ def loan_reminder(loan: Loan, due: LoanDue, today: date) -> str:
     return blocks(head, "<i>Оплата вручную. Когда оплатите — нажмите кнопку.</i>")
 
 
-BALANCE_REMINDER = ("🌙 Вечер — пришлите остаток на карте одним числом, "
-                    "и я посчитаю траты за день.")
+BALANCE_REMINDER = "🌙 Вечер — запишем остатки на карте и наличными, и я посчитаю траты за день."
+ASK_CARD = ("💳 Сколько сейчас на карте? Пришлите число, например <code>45000</code> "
+            "или <code>45 000,50</code>.\n/cancel — отмена")
+ASK_CASH = ("💵 Сколько наличных? Например <code>5000</code>, или <code>0</code>, "
+            "если их нет.\n/cancel — отмена")
 
 
 def payout_breakdown(payout: Payout, user: User) -> str:

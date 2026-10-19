@@ -365,10 +365,60 @@ async def test_evening_balance_reminder(h, now):
     await onboard(h)
     now.set(datetime(2026, 10, 18, 18, 0, tzinfo=UTC))  # 21:00 MSK, no balance today
     await h.tick()
-    assert "пришлите остаток" in h.net.sent()[-1].text
+    reminder = h.net.sent()[-1]
+    assert "запишем остатки" in reminder.text
+    assert reminder.reply_markup.inline_keyboard[0][0].callback_data == "bal:start"
     count = len(h.net.sent())
     await h.tick()
     assert len(h.net.sent()) == count
+
+
+def _button(h):
+    return plain(h.net.sent()[-1].reply_markup.inline_keyboard[0][0].text)
+
+
+async def test_evening_dialog_card_then_cash(h, now):
+    await onboard(h, balance="20000")
+    await h.text("нал 3000")
+    now.set(datetime(2026, 10, 18, 18, 0, tzinfo=UTC))
+    assert "Сколько сейчас на карте" in await h.tap("bal:start")
+    assert _button(h) == "Без изменений (20 000 ₽)"
+    assert "Сколько наличных" in await h.text("19000")
+    assert _button(h) == "Без изменений (3 000 ₽)"
+    text = await h.text("1000")
+    # 1 000 from the card and 2 000 in cash
+    assert "Потрачено со вчера: 3 000 ₽" in text
+    snaps = await h.all(BalanceSnapshot)
+    assert sorted((s.account, s.on_date.day, s.amount_minor) for s in snaps) == [
+        ("card", 17, 2_000_000), ("card", 18, 1_900_000),
+        ("cash", 17, 300_000), ("cash", 18, 100_000),
+    ]
+    # The dialog is over: a number is a card balance again
+    assert "на карте 18 000 ₽" in await h.text("18000")
+
+
+async def test_evening_dialog_unchanged(h, now):
+    await onboard(h, balance="20000")
+    now.set(datetime(2026, 10, 18, 18, 0, tzinfo=UTC))
+    await h.tap("bal:start")
+    await h.tap("bal:same")
+    assert _button(h) == "Без изменений (0 ₽)"
+    text = await h.tap("bal:same")
+    assert "Потрачено со вчера: 0 ₽" in text
+    snaps = await h.all(BalanceSnapshot)
+    assert [(s.account, s.on_date.day, s.amount_minor) for s in snaps] == [
+        ("card", 17, 2_000_000), ("card", 18, 2_000_000),
+    ]
+
+
+async def test_evening_dialog_bad_input(h, now):
+    await onboard(h, balance="20000")
+    now.set(datetime(2026, 10, 18, 18, 0, tzinfo=UTC))
+    await h.tap("bal:start")
+    assert "Не понял сумму" in await h.text("много")
+    await h.text("19000")
+    assert "Не понял сумму" in await h.text("-500")
+    assert "Потрачено со вчера: 1 000 ₽" in await h.text("0")
 
 
 async def test_payday_question_and_summary(h, now):
